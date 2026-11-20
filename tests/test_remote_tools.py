@@ -6,8 +6,7 @@ console script and through ``python -m``, and talk to it over stdio; the rest
 build the production server in process and use a real FastMCP client.
 
 Whatever goes wrong with the catalog, a client must see exactly the built-in
-tools (`fixtures/tool-contract/tools.json` and, on a Direct server,
-`login-app-tools.json`) and the built-in instructions.
+tools (`fixtures/tool-contract/tools.json`) and the built-in instructions.
 
 The stub signs with a test key. In process, the ``stub`` fixture admits that
 key; a started process gets it from a ``sitecustomize`` on its ``PYTHONPATH``.
@@ -48,7 +47,7 @@ from fastmcp.client.transports import StdioTransport
 from test_profile_lease_integration import _hold_profile
 from test_server import (
     _THE_OPERATING_RULES,
-    _direct_tool_contract,
+    _TOOL_CONTRACT,
     _stand_in_the_lifespan,
     _wire_tools,
 )
@@ -102,7 +101,7 @@ _JOINED = _THE_OPERATING_RULES + "\nUse sample_remote_tool when asked.\n"
 
 
 def _builtin_contract() -> list[dict[str, Any]]:
-    return _direct_tool_contract()
+    return json.loads(_TOOL_CONTRACT.read_text(encoding="utf-8"))
 
 
 def _with_remote() -> list[dict[str, Any]]:

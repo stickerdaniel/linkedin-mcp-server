@@ -15,36 +15,41 @@
     font-size: var(--font-text-sm-size, 13px);
     line-height: var(--font-text-sm-line-height, 1.45);
   }
-  /* The status line comes first in the DOM, so Tab reaches its help control
-     before the page image, which keeps Tab for the remote page. It is shown
-     below the image. */
+  /* The status line comes first in the DOM, so Tab reaches its button before
+     the page image, which keeps Tab for the remote page. It is shown below the
+     image. */
   #view { display: flex; flex-direction: column; }
   #screen { order: 0; flex: none; display: block; width: 100%; height: auto; background: #fff; outline: none; cursor: default; }
   #screen[hidden] { display: none; }
   #screen:focus-visible { box-shadow: inset 0 0 0 2px var(--color-ring-primary, #0a66c2); }
-  #status { order: 1; display: flex; gap: 8px; align-items: center; padding: 8px 12px; }
+  #status { order: 1; display: flex; flex-wrap: wrap; gap: 8px; align-items: center; padding: 8px 12px; }
   body.live #status { border-top: 1px solid var(--color-border-secondary, rgba(127, 127, 127, 0.3)); }
   body.ended #status { padding: 14px 12px; color: var(--color-text-primary, inherit); }
+  body.live #text { color: var(--color-text-primary, inherit); }
+  #text { min-width: 0; overflow-wrap: anywhere; }
   #dot { width: 8px; height: 8px; border-radius: 50%; flex: none; background: var(--color-text-tertiary, #9a978f); }
   body.live #dot, body.success #dot { background: var(--color-text-success, #2f9e5c); }
   body.problem #dot { background: var(--color-text-danger, #c9483b); }
-  #help { margin-left: auto; flex: none; padding: 0; border: 0; background: none; color: inherit; font: inherit; text-decoration: underline; cursor: pointer; }
-  #help[hidden] { display: none; }
-  #fallback { margin: 0; padding: 0 12px 12px 28px; }
-  #fallback[hidden] { display: none; }
-  code { font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace); font-size: 0.95em; word-break: break-all; }
+  #hint { color: var(--color-text-tertiary, #9a978f); }
+  #hint[hidden] { display: none; }
+  #outside {
+    margin-left: auto; flex: none; display: inline-flex; align-items: center; gap: 5px; padding: 4px 9px;
+    border: 1px solid var(--color-border-secondary, rgba(127, 127, 127, 0.3)); border-radius: 7px;
+    background: var(--color-background-secondary, rgba(127, 127, 127, 0.08)); color: var(--color-text-primary, inherit);
+    font: inherit; cursor: pointer; transition: transform 160ms ease-out;
+  }
+  #outside:active { transform: scale(0.97); }
+  #outside:focus-visible { outline: 2px solid var(--color-ring-primary, #0a66c2); outline-offset: 2px; }
+  #outside[hidden] { display: none; }
 </style>
 <!--EXT_APPS_SDK-->
 </head>
 <body>
 <div id="view">
-<div id="status"><span id="dot"></span><span id="text" role="status">Connecting to the sign-in browser.</span><button id="help" type="button" aria-controls="fallback" aria-expanded="false">Sign in outside the chat</button></div>
+<div id="status"><span id="dot"></span><span id="text" role="status">Connecting to the sign-in browser.</span><span id="hint" hidden></span><button id="outside" type="button">Sign in from your browser <svg width="12" height="12" viewBox="0 0 12 12" aria-hidden="true"><path d="M4.5 2.5h-2v7h7v-2M6.5 2.5h3v3M9.5 2.5 5 7" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></svg></button></div>
 <img id="screen" tabindex="0" alt="The LinkedIn sign-in page" aria-describedby="screen-keys" draggable="false" hidden>
 <span id="screen-keys" hidden>Press Escape twice to leave the page.</span>
 </div>
-<p id="fallback" hidden>To sign in outside the chat, first quit your MCP client, such as Claude Desktop: the sign-in shown here holds the saved session until the server stops. Then run the Docker login viewer:
-<code>docker run -it --rm -v ~/.linkedin-mcp:/home/pwuser/.linkedin-mcp -p 127.0.0.1:6080:6080 stickerdaniel/linkedin-mcp-server:latest --login --login-viewer</code>,
-or on the host: <code>uvx mcp-server-linkedin@latest --login</code></p>
 <script type="module">
 // The sign-in view. The server keeps the login; this page only shows the
 // login browser's page and sends the user's input back. The result of
@@ -63,28 +68,34 @@ const RETRY_MS = 1000;
 // Transport failures of an attach are retried this often, with growing waits.
 const ATTACH_RETRIES = 3;
 const ATTACH_BACKOFF_MS = 500;
-const MAC = /Mac|iPhone|iPad/.test(navigator.platform);
+const MAC = /mac|iphone|ipad/i.test(navigator.userAgentData?.platform || navigator.platform || '');
 const NAMED_KEYS = new Set(['Enter', 'Tab', 'Backspace', 'Delete', 'Escape', 'ArrowUp',
   'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Home', 'End', 'PageUp', 'PageDown']);
-const LIVE = `Live. Click and type in the page, ${MAC ? 'Cmd' : 'Ctrl'}+V pastes.`;
+const LIVE = 'Live';
+const PASTE_HINT = `${MAC ? '⌘V' : 'Ctrl+V'} pastes`;
 const SIGNED_IN = 'Signed in to LinkedIn. You can close this.';
 const ENDINGS = {
-  signed_in: [SIGNED_IN, 'success', false],
-  repaired_by_peer: [SIGNED_IN, 'success', false],
-  restricted: ['LinkedIn restricted this account. Open linkedin.com in your browser to see why.', 'problem', false],
-  cancelled: ['The sign-in was stopped.', 'problem', true],
-  failed: ['The sign-in did not finish.', 'problem', true],
+  signed_in: [SIGNED_IN, 'success'],
+  repaired_by_peer: [SIGNED_IN, 'success'],
+  restricted: ['LinkedIn restricted this account. Open linkedin.com in your browser to see why.', 'problem'],
+  cancelled: ['The sign-in was stopped.', 'problem'],
+  failed: ['The sign-in did not finish.', 'problem'],
 };
 // The server process that runs this sign-in no longer answers: it stopped, or
 // the sign-in's status ran out. Terminal, like a refusal.
 const UNAVAILABLE = 'The sign-in this view showed is no longer reachable. Ask for the LinkedIn sign-in again.';
 const MAYBE_SENT = 'That input may not have reached the page; check it before typing again.';
 const REFUSALS = {
-  replaced: ['A newer sign-in view replaced this one.', false],
-  expired: ['This sign-in view expired. Ask for the LinkedIn sign-in again.', true],
-  denied: ['This view has no access to the sign-in.', false],
-  unavailable: [UNAVAILABLE, true],
+  replaced: 'A newer sign-in view replaced this one.',
+  expired: 'This sign-in view expired. Ask for the LinkedIn sign-in again.',
+  denied: 'This view has no access to the sign-in.',
+  unavailable: UNAVAILABLE,
 };
+const GUIDE = 'https://github.com/stickerdaniel/linkedin-mcp-server#sign-in-outside-the-chat';
+const RELEASED = 'Continue in your browser, then ask for your LinkedIn data again.';
+// The login may still hold the browser profile, which the outside sign-in then
+// reports as busy until the chat app quits and stops its server.
+const MAYBE_HELD = 'Continue in your browser. If it reports a busy browser, quit this chat app once.';
 const ATTACH_ENDINGS = {
   replaced: 'A newer sign-in view replaced this one.',
   none: 'This sign-in is no longer available. Ask for the LinkedIn sign-in again.',
@@ -95,8 +106,9 @@ const UNREACHABLE = 'The chat could not reach the sign-in.';
 
 const screen = document.getElementById('screen');
 const text = document.getElementById('text');
-const fallback = document.getElementById('fallback');
-const help = document.getElementById('help');
+const hint = document.getElementById('hint');
+const outside = document.getElementById('outside');
+hint.textContent = PASTE_HINT;
 
 const app = new App({ name: 'linkedin-login-view', version: '1.0.0' }, {}, { autoResize: true });
 
@@ -117,25 +129,16 @@ let pageId = null;
 let geometry = null;
 const queue = [];
 let sending = false;
-// The way out of the chat (the CLI viewer, host --login) stays one click away
-// in every state but a finished sign-in, because the page view cannot show
-// everything a sign-in may need, such as a native browser dialog.
-let helpOpen = false;
+let leaving = false;
 
-function renderHelp() {
-  fallback.hidden = !helpOpen;
-  help.setAttribute('aria-expanded', String(helpOpen));
-}
-
-help.addEventListener('click', () => {
-  helpOpen = !helpOpen;
-  renderHelp();
-});
-
+// The way out of the chat stays one click away in every state but a finished
+// sign-in, because the page view cannot show everything a sign-in may need,
+// such as a native browser dialog.
 function show(tone, message) {
   document.body.className = tone;
   text.textContent = message;
-  help.hidden = tone.includes('success');
+  hint.hidden = tone !== 'live';
+  outside.hidden = tone.includes('success');
 }
 
 function forgetBinding() {
@@ -145,7 +148,7 @@ function forgetBinding() {
   attachTimer = null;
 }
 
-function end(tone, message, openHelp) {
+function end(tone, message) {
   ended = true;
   grant = null;
   forgetBinding();
@@ -153,9 +156,38 @@ function end(tone, message, openHelp) {
   screen.hidden = true;
   screen.removeAttribute('src');
   show(`ended ${tone}`, message);
-  helpOpen = openHelp;
-  renderHelp();
 }
+
+// Ends this view's login first, so the sign-in outside the chat finds the
+// browser profile free, then opens the guide in the user's browser.
+async function signInOutside() {
+  if (leaving) return;
+  leaving = true;
+  const held = grant && !ended ? { grant, attempt_id: attemptId } : null;
+  end('waiting', 'Ending the sign-in in the chat.');
+  let release = null;
+  if (held) {
+    try {
+      const result = await app.callServerTool({ name: 'login_view_release', arguments: held });
+      release = result.isError ? null : JSON.parse(textOf(result)).release;
+    } catch {
+      release = null;
+    }
+  }
+  let opened = false;
+  if (app.getHostCapabilities()?.openLinks) {
+    try {
+      opened = !(await app.openLink({ url: GUIDE }))?.isError;
+    } catch {
+      opened = false;
+    }
+  }
+  if (!opened) end('info', `Open ${GUIDE} in your browser.`);
+  else end('info', release === 'released' ? RELEASED : MAYBE_HELD);
+  leaving = false;
+}
+
+outside.addEventListener('click', signInOutside);
 
 function textOf(result) {
   const parts = (result?.content ?? []).filter((c) => c.type === 'text').map((c) => c.text);
@@ -183,7 +215,7 @@ app.ontoolresult = (params) => {
       || typeof shown.attempt_id !== 'string' || typeof shown.open_id !== 'string') {
     // open_login answered in words instead of a view: a session is already in
     // place, or the client or container cannot show the sign-in.
-    end(params?.isError ? 'problem' : 'info', textOf(params) || 'There is nothing to sign in to.', Boolean(params?.isError));
+    end(params?.isError ? 'problem' : 'info', textOf(params) || 'There is nothing to sign in to.');
     return;
   }
   if (binding && binding.attemptId === shown.attempt_id && binding.openId === shown.open_id) {
@@ -234,7 +266,7 @@ async function attach() {
   if (result === null) {
     attachTries += 1;
     if (attachTries > ATTACH_RETRIES) {
-      end('problem', UNREACHABLE, true);
+      end('problem', UNREACHABLE);
       return;
     }
     show('problem', `${UNREACHABLE} Retrying.`);
@@ -245,7 +277,7 @@ async function attach() {
     return;
   }
   if (result.isError) {
-    end('problem', textOf(result) || UNDELIVERED, true);
+    end('problem', textOf(result) || UNDELIVERED);
     return;
   }
   let reply = {};
@@ -255,13 +287,13 @@ async function attach() {
     // Read as a missing grant below.
   }
   if (reply.access in ATTACH_ENDINGS) {
-    end('problem', ATTACH_ENDINGS[reply.access], true);
+    end('problem', ATTACH_ENDINGS[reply.access]);
     return;
   }
   const view = result._meta?.[META_KEY];
   if (typeof view?.grant !== 'string' || view.attempt_id !== asked.attemptId
       || view.open_id !== asked.openId) {
-    end('problem', UNDELIVERED, true);
+    end('problem', UNDELIVERED);
     return;
   }
   grant = view.grant;
@@ -301,7 +333,7 @@ async function poll() {
       }
       if (grant !== asked || ended) continue;
       if (result.isError) {
-        end('problem', textOf(result) || 'The sign-in view failed.', true);
+        end('problem', textOf(result) || 'The sign-in view failed.');
         break;
       }
       onFrame(result);
@@ -319,14 +351,13 @@ function onFrame(result) {
     return;
   }
   if (reply.access in REFUSALS) {
-    const [message, openHelp] = REFUSALS[reply.access];
-    end('problem', message, openHelp);
+    end('problem', REFUSALS[reply.access]);
     return;
   }
   const ending = ENDINGS[reply.state];
   if (ending) {
-    const [message, tone, help] = ending;
-    end(tone, reply.state === 'failed' && reply.reason ? `${message} ${reply.reason}` : message, help);
+    const [message, tone] = ending;
+    end(tone, reply.state === 'failed' && reply.reason ? `${message} ${reply.reason}` : message);
     return;
   }
   const image = (result.content ?? []).find((c) => c.type === 'image');
@@ -441,7 +472,7 @@ async function pump() {
         // Not an answer of this view's tool; the next frame says what happened.
       }
       if (!ended && reply.access === 'unavailable') {
-        end('problem', UNAVAILABLE, true);
+        end('problem', UNAVAILABLE);
         break;
       }
       if (!ended && reply.input === 'stale') {
@@ -477,17 +508,17 @@ screen.addEventListener('wheel', (event) => {
 
 // The image forwards Tab and Escape to the remote page, so focus would never
 // leave it. A second Escape within ESCAPE_TWICE_MS is the way out: it is not
-// forwarded and moves focus to the help control.
+// forwarded and moves focus to the button that leads out of the chat.
 const ESCAPE_TWICE_MS = 1000;
 let lastEscape = -Infinity;
 
 screen.addEventListener('keydown', (event) => {
   if (event.isComposing) return;
   if (event.key === 'Escape' && !event.repeat) {
-    if (event.timeStamp - lastEscape < ESCAPE_TWICE_MS && !help.hidden) {
+    if (event.timeStamp - lastEscape < ESCAPE_TWICE_MS && !outside.hidden) {
       event.preventDefault();
       lastEscape = -Infinity;
-      help.focus();
+      outside.focus();
       return;
     }
     lastEscape = event.timeStamp;
@@ -533,7 +564,7 @@ app.connect().then(() => {
   attach();
   start();
 }).catch(() => {
-  end('problem', 'The chat could not open the sign-in view.', true);
+  end('problem', 'The chat could not open the sign-in view.');
 });
 </script>
 </body>

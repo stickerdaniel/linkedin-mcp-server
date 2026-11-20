@@ -14,6 +14,8 @@ import asyncio
 import io
 import json
 import logging
+import subprocess
+import sys
 from collections.abc import AsyncIterator
 from pathlib import Path
 from types import SimpleNamespace
@@ -37,10 +39,12 @@ from linkedin_mcp_server.config import get_config
 from linkedin_mcp_server.core.exceptions import AuthenticationError
 from linkedin_mcp_server.exceptions import BrowserBusyError, BrowserSetupFailedError
 from linkedin_mcp_server.login_viewer import LoginViewerError
+from linkedin_mcp_server.profile_claim import ensure_profile_claim
 from linkedin_mcp_server.server import create_mcp_server
-from linkedin_mcp_server.session_state import source_state_path
+from linkedin_mcp_server.session_state import auth_root_dir, source_state_path
 
 _VIEW = "linkedin.dev/login-view"
+_LEASE_WORKER = Path(__file__).parent / "helpers" / "profile_lease_worker.py"
 _DOCKER_TEXT = "Create one with the explicit --login --login-viewer Docker command"
 
 
@@ -84,6 +88,7 @@ def login(isolate_profile_dir: Path, monkeypatch: pytest.MonkeyPatch) -> StandIn
     """A Docker server's login, with a persistent mount and an installed browser."""
     stand_in = StandInLogin(isolate_profile_dir)
     _stand_in_the_lifespan(monkeypatch)
+    monkeypatch.setenv("LINKEDIN_MCP_RUNTIME", "docker")
     bootstrap.initialize_bootstrap("docker")
     monkeypatch.setattr(bootstrap, "interactive_login", stand_in)
     monkeypatch.setattr(bootstrap, "_ensure_browser_installed", AsyncMock())
@@ -225,6 +230,19 @@ class TestWhoIsOfferedTheView:
         assert "-v ~/.linkedin-mcp:/home/pwuser/.linkedin-mcp" in _text(result)
         assert login.calls == []
 
+    async def test_a_container_without_the_docker_marker_never_names_open_login(
+        self, isolate_profile_dir: Path
+    ):
+        # The container policy comes from the runtime id, the view only from
+        # the image's marker, and without it no server registers open_login.
+        bootstrap.initialize_bootstrap("docker")
+
+        with pytest.raises(Exception) as raised:
+            await bootstrap.ensure_tool_ready_or_raise("get_feed", _ui_ctx())
+
+        assert _DOCKER_TEXT in str(raised.value)
+        assert "open_login" not in str(raised.value)
+
 
 class TestWhatOpenLoginStarts:
     async def test_open_login_carries_no_grant_and_attach_carries_it_in_meta(
@@ -364,6 +382,7 @@ class TestHowTheAttemptEnds:
         self, isolate_profile_dir: Path, monkeypatch: pytest.MonkeyPatch
     ):
         _stand_in_the_lifespan(monkeypatch)
+        monkeypatch.setenv("LINKEDIN_MCP_RUNTIME", "docker")
         bootstrap.initialize_bootstrap("managed")
         monkeypatch.setattr(bootstrap, "browser_setup_ready", lambda: True)
         monkeypatch.setattr(bootstrap, "_auto_import_allowed", lambda: True)
@@ -632,6 +651,189 @@ class TestTheGrant:
         assert login.page.received == [("insert_text", "pässwörd ✓")]
 
 
+class HoldingBrowser:
+    """The browser behind the real ``interactive_login``.
+
+    The profile lease, the rotation and the restore around it are production's.
+    It runs until cancelled, holds its cleanup until :attr:`cleanup` is set, and
+    then reports a confirmed shutdown unless :attr:`confirm_close` is off.
+    """
+
+    def __init__(self) -> None:
+        self.opened = asyncio.Event()
+        self.cleanup = asyncio.Event()
+        self.cleanup.set()
+        self.confirm_close = True
+        self.cleaned_up = False
+
+    async def __call__(self, _profile: Path, *, config: object, state: Any) -> bool:
+        self.opened.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            await self.cleanup.wait()
+            state.close_confirmed = self.confirm_close
+            self.cleaned_up = True
+        return False
+
+
+def hold_the_profile(monkeypatch: pytest.MonkeyPatch, profile: Path) -> HoldingBrowser:
+    """A Docker server whose login holds *profile*'s lease as the real one does."""
+    from linkedin_mcp_server import setup
+
+    browser = HoldingBrowser()
+    _stand_in_the_lifespan(monkeypatch)
+    monkeypatch.setenv("LINKEDIN_MCP_RUNTIME", "docker")
+    bootstrap.initialize_bootstrap("docker")
+    monkeypatch.setattr(bootstrap, "_ensure_browser_installed", AsyncMock())
+    monkeypatch.setattr(login_app, "require_persistent_profile_mount", lambda _p: None)
+    monkeypatch.setattr(setup, "_login_into_fresh_profile", browser)
+    monkeypatch.setattr(setup, "close_browser", AsyncMock())
+    monkeypatch.setattr(setup, "start_browser_guardian", lambda _fd: None)
+    monkeypatch.setattr(setup, "release_browser_guardian", lambda: None)
+    ensure_profile_claim(profile)
+    return browser
+
+
+def free_for_another_process(profile: Path) -> bool:
+    """Whether a separate process can take *profile*'s lease right now."""
+    probe = subprocess.run(
+        [sys.executable, str(_LEASE_WORKER), "probe", str(auth_root_dir(profile))],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=True,
+    )
+    return "free=True" in probe.stdout
+
+
+async def _release(client: Client, view: dict[str, str]) -> mt.CallToolResult:
+    return await client.call_tool_mcp(
+        "login_view_release",
+        {"grant": view["grant"], "attempt_id": view["attempt_id"]},
+    )
+
+
+class TestRelease:
+    @pytest.fixture
+    def browser(
+        self, isolate_profile_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> HoldingBrowser:
+        return hold_the_profile(monkeypatch, isolate_profile_dir)
+
+    async def _running(self, client: Client, browser: HoldingBrowser) -> dict[str, str]:
+        _, view = await _open(client)
+        assert view is not None
+        await asyncio.wait_for(browser.opened.wait(), 10)
+        return view
+
+    async def test_a_release_ends_the_login_and_another_process_takes_the_profile(
+        self, browser: HoldingBrowser, isolate_profile_dir: Path
+    ):
+        async with _ui_client(create_mcp_server()) as client:
+            view = await self._running(client, browser)
+            busy_before = not free_for_another_process(isolate_profile_dir)
+
+            released = await _release(client, view)
+            ended = _reply(await _frame(client, view))
+
+        assert busy_before
+        assert _reply(released) == {"access": "full", "release": "released"}
+        assert free_for_another_process(isolate_profile_dir)
+        assert ended["access"] == "status" and ended["state"] == "cancelled"
+
+    async def test_a_browser_whose_shutdown_is_unconfirmed_keeps_the_profile(
+        self, browser: HoldingBrowser, isolate_profile_dir: Path
+    ):
+        browser.confirm_close = False
+        async with _ui_client(create_mcp_server()) as client:
+            view = await self._running(client, browser)
+
+            released = await _release(client, view)
+
+        assert _reply(released) == {"access": "full", "release": "held"}
+        assert not free_for_another_process(isolate_profile_dir)
+
+    async def test_a_cleanup_past_the_wait_answers_ending_and_still_finishes(
+        self,
+        browser: HoldingBrowser,
+        isolate_profile_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        monkeypatch.setattr(login_app, "RELEASE_WAIT_S", 0.2)
+        browser.cleanup.clear()
+        async with _ui_client(create_mcp_server()) as client:
+            view = await self._running(client, browser)
+
+            released = await _release(client, view)
+            browser.cleanup.set()
+            await _until(client, view, "cancelled")
+
+        assert _reply(released) == {"access": "full", "release": "ending"}
+        assert browser.cleaned_up
+        assert free_for_another_process(isolate_profile_dir)
+
+    async def test_two_releases_at_once_cancel_the_login_once(
+        self, browser: HoldingBrowser, isolate_profile_dir: Path
+    ):
+        browser.cleanup.clear()
+        async with _ui_client(create_mcp_server()) as client:
+            view = await self._running(client, browser)
+
+            first = asyncio.create_task(_release(client, view))
+            second = asyncio.create_task(_release(client, view))
+            await asyncio.sleep(0.3)
+            browser.cleanup.set()
+            answers = await asyncio.gather(first, second)
+
+        assert [_reply(answer)["release"] for answer in answers] == [
+            "released",
+            "released",
+        ]
+        assert browser.cleaned_up
+        assert free_for_another_process(isolate_profile_dir)
+
+    async def test_a_caller_that_gives_up_leaves_the_cleanup_running(
+        self, browser: HoldingBrowser, isolate_profile_dir: Path
+    ):
+        browser.cleanup.clear()
+        async with _ui_client(create_mcp_server()) as client:
+            view = await self._running(client, browser)
+
+            with pytest.raises(TimeoutError):
+                await asyncio.wait_for(
+                    bootstrap.release_login(view["attempt_id"], wait_s=5), 0.2
+                )
+            browser.cleanup.set()
+            await _until(client, view, "cancelled")
+
+        assert browser.cleaned_up
+        assert free_for_another_process(isolate_profile_dir)
+
+    async def test_an_ended_attempts_grant_leaves_the_running_login_alone(
+        self, client: Client, login: StandInLogin
+    ):
+        first = await _open_shown(client)
+        login.finish.set()
+        _, early = await _attach(client, first)
+        assert early is not None
+        await _until(client, early, "signed_in")
+        login.finish = asyncio.Event()
+        await _a_tool_finds_the_session_dead()
+        _, current = await _open(client)
+        assert current is not None
+        await _until(client, current, "image")
+
+        stale = await _release(client, early)
+        made_up = await _release(client, {**current, "grant": "not-the-grant"})
+        still = await _frame(client, current)
+
+        assert _reply(stale) == {"access": "status", "release": "settled"}
+        assert _reply(made_up) == {"access": "denied"}
+        assert not login.cancelled
+        assert _reply(still)["state"] == "signing_in" and len(_images(still)) == 1
+
+
 class TestNothingLeaks:
     async def test_invalid_view_arguments_and_the_debug_log_name_no_values(
         self, client: Client, login: StandInLogin
@@ -667,23 +869,33 @@ class TestNothingLeaks:
                     "events": [{"type": "paste", "text": "SYNTHETIC-SECRET" * 300}],
                 },
             )
+            refused = await client.call_tool_mcp(
+                "login_view_release",
+                {"grant": "SYNTHETIC-RELEASE" * 20, "attempt_id": view["attempt_id"]},
+            )
+            released = await _release(client, view)
         finally:
             for lg, level in previous:
                 lg.removeHandler(handler)
                 lg.setLevel(level)
 
         assert _reply(accepted)["input"] == "applied"
-        assert rejected.is_error
+        assert _reply(released)["release"] == "released"
+        assert rejected.is_error and refused.is_error
         assert "string_too_long" in _text(rejected)
+        assert "string_too_long" in _text(refused)
         logs = captured.getvalue()
-        assert "login_view_input" in logs  # the call was logged, its arguments were not
+        # The calls were logged, their arguments were not.
+        assert "login_view_input" in logs and "login_view_release" in logs
         for secret in (
             "SYNTHETIC-PASSWORD",
             "SYNTHETIC-GRANT",
             "SYNTHETIC-SECRET",
+            "SYNTHETIC-RELEASE",
             view["grant"],
         ):
             assert secret not in _text(rejected)
+            assert secret not in _text(refused)
             assert secret not in logs
 
 

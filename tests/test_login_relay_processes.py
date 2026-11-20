@@ -64,6 +64,7 @@ def _server(root: Path) -> StdioTransport:
         USER_DATA_DIR=str(root / "auth" / "profile"),
         CHROME_PATH=sys.executable,
         AUTO_IMPORT_FROM_BROWSER="false",
+        LINKEDIN_MCP_RUNTIME="docker",
         LINKEDIN_MCP_REMOTE_TOOLS="off",
         LINKEDIN_MCP_CHECK_FOR_UPDATES="false",
         LOGIN_RELAY_TEST_EVENTS=str(root / "events.jsonl"),

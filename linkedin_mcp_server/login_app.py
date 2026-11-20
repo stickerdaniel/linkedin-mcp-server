@@ -4,8 +4,13 @@
 host renders ``ui://linkedin-mcp/login.html`` (``login_app/viewer.html``). That
 page calls ``login_view_attach`` for its grant, then polls ``login_view_frame``
 for images of the login browser's page and sends the user's clicks, keys and
-pastes through ``login_view_input``. The login itself is the ordinary one from
-``bootstrap``; see ``login_view`` for how the page borrows its browser.
+pastes through ``login_view_input``. ``login_view_release`` ends the login, so
+the user can sign in outside the chat on the same profile. The login itself is
+the ordinary one from ``bootstrap``; see ``login_view`` for how the page
+borrows its browser.
+
+Only the Docker image offers the view: every other install opens its login
+browser on the user's own screen.
 
 Trust model. ``open_login`` returns no grant. Its ``structuredContent`` names
 the attempt and a non-secret ``open_id``; the page hands both to the app-only
@@ -27,7 +32,7 @@ view tool is a routing wrapper: an attempt this process knows is handled here,
 any other one is forwarded through ``login_relay`` to the process that owns it,
 which validates the arguments and runs the same local operation once. The
 relay socket lives in the auth root, next to the session cookies, and accepts
-only the three view operations.
+only the four view operations.
 """
 
 from __future__ import annotations
@@ -61,6 +66,7 @@ from linkedin_mcp_server.bootstrap import (
     docker_auth_remedy,
     docker_dead_generation,
     get_runtime_policy,
+    release_login,
     running_login_attempt,
     session_files_ready,
     start_login_if_needed,
@@ -89,6 +95,7 @@ from linkedin_mcp_server.login_viewer import (
     LoginViewerError,
     require_persistent_profile_mount,
 )
+from linkedin_mcp_server.remote_catalog import install_kind
 from linkedin_mcp_server.server_role import ServerRole, process_role
 from linkedin_mcp_server.session_state import PeerSessionInPlaceError
 
@@ -133,17 +140,22 @@ INPUT_OUTCOME_UNKNOWN = (
     "The page may have received part of that input; check it before typing again."
 )
 
+#: How long a release waits for the login's cleanup before it answers ``ending``.
+RELEASE_WAIT_S = 20.0
+
 #: Per operation, the owner's own deadline fits inside the forwarding call's,
 #: which fits inside the tool's timeout, so the owner always answers first.
 _OWNER_DEADLINE_S: dict[login_relay.Operation, float] = {
     "login_view_attach": 5.0,
     "login_view_frame": MAX_BUDGET_S + 5,
     "login_view_input": 25.0,
+    "login_view_release": 25.0,
 }
 _FORWARD_DEADLINE_S: dict[login_relay.Operation, float] = {
     "login_view_attach": 7.0,
     "login_view_frame": MAX_BUDGET_S + 7,
     "login_view_input": 28.0,
+    "login_view_release": 28.0,
 }
 
 _AttemptId = Annotated[str, Field(max_length=64)]
@@ -179,11 +191,20 @@ class _InputArgs(BaseModel):
     events: _Events
 
 
+class _ReleaseArgs(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    grant: _GrantText
+    attempt_id: _AttemptId
+
+
+def login_app_offered() -> bool:
+    """Whether this process offers the sign-in view: the Docker image's Direct server."""
+    return process_role() is ServerRole.DIRECT and install_kind() == "docker"
+
+
 def _transport_allows_view() -> bool:
-    """Whether this server may show a sign-in view at all: Direct, over stdio."""
-    return (
-        process_role() is ServerRole.DIRECT and get_config().server.transport == "stdio"
-    )
+    """Whether this server may show a sign-in view at all: offered, over stdio."""
+    return login_app_offered() and get_config().server.transport == "stdio"
 
 
 def view_available(ctx: Context | None) -> bool:
@@ -420,6 +441,9 @@ async def _forwarded(
             # did not, and never send it again.
             return error_result(INPUT_OUTCOME_UNKNOWN, ErrorCode.OUTCOME_UNKNOWN)
         return _reply({"access": "unavailable", "input": "refused"})
+    if operation == "login_view_release" and sent.delivery == "lost":
+        # Sent and not answered: the login may be ending.
+        return _reply({"release": "ending"})
     return _reply({"access": "unavailable"})
 
 
@@ -479,10 +503,10 @@ def _generation(observed: str | None | object) -> str | None:
 
 
 def register_login_app(mcp: FastMCP, *, tool_timeout: float) -> None:
-    """Register ``open_login``, the three view tools and the view's page on *mcp*.
+    """Register ``open_login``, the four view tools and the view's page on *mcp*.
 
-    Only for the Direct role: an owner has no client to show a view to, and a
-    proxy forwards tools without the page they need.
+    Only where :func:`login_app_offered`: an owner has no client to show a view
+    to, and a proxy forwards tools without the page they need.
     """
     _withhold_view_arguments()
     grants = _Opens()
@@ -616,6 +640,13 @@ def register_login_app(mcp: FastMCP, *, tool_timeout: float) -> None:
             {"access": access, "input": result.status, "applied": result.applied}
         )
 
+    async def release_here(args: _ReleaseArgs) -> ToolResult:
+        access, attempt = grants.check(args.grant, args.attempt_id)
+        if attempt is None:
+            return _reply({"access": access})
+        release = await release_login(attempt.id, wait_s=RELEASE_WAIT_S)
+        return _reply({"access": access, "release": release})
+
     async def relayed(
         operation: login_relay.Operation, arguments: Mapping[str, object]
     ) -> ToolResult:
@@ -625,6 +656,8 @@ def register_login_app(mcp: FastMCP, *, tool_timeout: float) -> None:
             return await attach_here(_AttachArgs.model_validate(arguments))
         if operation == "login_view_frame":
             return await frame_here(_FrameArgs.model_validate(arguments))
+        if operation == "login_view_release":
+            return await release_here(_ReleaseArgs.model_validate(arguments))
         return await input_here(_InputArgs.model_validate(arguments))
 
     async def answer_relayed(
@@ -639,6 +672,8 @@ def register_login_app(mcp: FastMCP, *, tool_timeout: float) -> None:
         except TimeoutError:
             if operation == "login_view_input":
                 result = error_result(INPUT_OUTCOME_UNKNOWN, ErrorCode.OUTCOME_UNKNOWN)
+            elif operation == "login_view_release":
+                result = _reply({"release": "ending"})
             else:
                 result = error_result(
                     "The sign-in view did not answer in time.", ErrorCode.INTERNAL
@@ -718,4 +753,21 @@ def register_login_app(mcp: FastMCP, *, tool_timeout: float) -> None:
             return await input_here(args)
         return await _forwarded(
             "login_view_input", args.model_dump(mode="json"), attempt_id
+        )
+
+    @mcp.tool(
+        name="login_view_release",
+        timeout=30,
+        annotations={"readOnlyHint": False, "openWorldHint": False},
+        app=AppConfig(visibility=["app"]),
+    )
+    async def login_view_release(
+        grant: _GrantText, attempt_id: _AttemptId
+    ) -> ToolResult:
+        """Called by the sign-in view: end the login, so it can run outside the chat."""
+        args = _ReleaseArgs(grant=grant, attempt_id=attempt_id)
+        if runs_here(attempt_id):
+            return await release_here(args)
+        return await _forwarded(
+            "login_view_release", args.model_dump(mode="json"), attempt_id
         )

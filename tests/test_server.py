@@ -168,15 +168,28 @@ def _server_for(role: ServerRole) -> FastMCP:
 #: Every local tool as ``tools/list`` puts it on the wire. A difference is a
 #: change every client sees, so update the file only for an intended one.
 _TOOL_CONTRACT = Path(__file__).parent / "fixtures" / "tool-contract" / "tools.json"
-#: The tools only a Direct server adds: the sign-in view's, in the same form.
+#: The tools only the Docker image's Direct server adds: the sign-in view's, in
+#: the same form.
 _LOGIN_APP_CONTRACT = _TOOL_CONTRACT.with_name("login-app-tools.json")
 
 
-def _direct_tool_contract() -> list[dict[str, Any]]:
-    """What a Direct server lists: every shared tool plus the sign-in view's."""
+def _docker_tool_contract() -> list[dict[str, Any]]:
+    """What the Docker image's Direct server lists: every shared tool plus the view's."""
     shared = json.loads(_TOOL_CONTRACT.read_text(encoding="utf-8"))
     login_app = json.loads(_LOGIN_APP_CONTRACT.read_text(encoding="utf-8"))
     return sorted([*shared, *login_app], key=lambda tool: tool["name"])
+
+
+#: Each install as its launcher declares it in ``LINKEDIN_MCP_RUNTIME``; uvx and
+#: a source checkout set nothing.
+_EVERY_INSTALL = pytest.mark.parametrize(
+    "install", ["unset", "mcpb", "docker"], ids=["no marker", "mcpb", "docker"]
+)
+
+
+def _installed_as(monkeypatch: pytest.MonkeyPatch, install: str) -> None:
+    if install != "unset":
+        monkeypatch.setenv("LINKEDIN_MCP_RUNTIME", install)
 
 
 #: Each client mode with the era it must actually negotiate. Written out rather
@@ -244,11 +257,13 @@ class TestToolContract:
     @pytest.mark.parametrize(
         "role", [role for role in ServerRole if role.drives_browser]
     )
+    @_EVERY_INSTALL
     @_BOTH_ERAS
     async def test_the_served_tools_match_the_recorded_contract(
         self,
         monkeypatch: pytest.MonkeyPatch,
         role: ServerRole,
+        install: str,
         mode: str,
         protocol: str,
     ):
@@ -256,11 +271,12 @@ class TestToolContract:
         # argument that leaks into `inputSchema`, a lost `outputSchema` or a
         # changed safety annotation is a change every client sees. Both eras a
         # client may speak, because the fixture was recorded on the handshake
-        # era and a current client negotiates the other one. Only a Direct
-        # server adds the sign-in view's tools; an owner lists exactly the
-        # shared ones.
-        if role is ServerRole.DIRECT:
-            recorded = _direct_tool_contract()
+        # era and a current client negotiates the other one. Only the Docker
+        # image's Direct server adds the sign-in view's tools; every other
+        # server lists exactly the shared ones.
+        _installed_as(monkeypatch, install)
+        if role is ServerRole.DIRECT and install == "docker":
+            recorded = _docker_tool_contract()
         else:
             recorded = json.loads(_TOOL_CONTRACT.read_text(encoding="utf-8"))
 
@@ -268,12 +284,14 @@ class TestToolContract:
             await _served_tool_contract(monkeypatch, role, mode, protocol) == recorded
         )
 
+    @_EVERY_INSTALL
     @_BOTH_ERAS
-    async def test_only_a_direct_server_offers_the_sign_in_page(
-        self, monkeypatch: pytest.MonkeyPatch, mode: str, protocol: str
+    async def test_only_the_docker_direct_server_offers_the_sign_in_page(
+        self, monkeypatch: pytest.MonkeyPatch, install: str, mode: str, protocol: str
     ):
         # The page `open_login` names in its `_meta.ui.resourceUri`. An owner
         # has no client to show it to, and resources are not forwarded.
+        _installed_as(monkeypatch, install)
         _stand_in_the_lifespan(monkeypatch)
 
         async def resources(role: ServerRole) -> list[dict[str, Any]]:
@@ -285,17 +303,19 @@ class TestToolContract:
                 for resource in listed
             ]
 
+        page = {
+            "name": "login_view",
+            "title": "LinkedIn sign-in",
+            "uri": "ui://linkedin-mcp/login.html",
+            "description": "The page open_login shows to sign in to LinkedIn.",
+            "mimeType": "text/html;profile=mcp-app",
+            "_meta": {"ui": {"prefersBorder": True}, "fastmcp": {"tags": []}},
+        }
+
         assert await resources(ServerRole.OWNER) == []
-        assert await resources(ServerRole.DIRECT) == [
-            {
-                "name": "login_view",
-                "title": "LinkedIn sign-in",
-                "uri": "ui://linkedin-mcp/login.html",
-                "description": "The page open_login shows to sign in to LinkedIn.",
-                "mimeType": "text/html;profile=mcp-app",
-                "_meta": {"ui": {"prefersBorder": True}, "fastmcp": {"tags": []}},
-            }
-        ]
+        assert await resources(ServerRole.DIRECT) == (
+            [page] if install == "docker" else []
+        )
 
     @_BOTH_ERAS
     async def test_a_proxy_serves_the_owners_tools_unchanged(
@@ -400,15 +420,20 @@ class TestServerRoles:
                 _has_middleware(mcp, UpdateNoticeMiddleware) == role.faces_a_client
             ), role
 
-    def test_every_role_that_drives_a_browser_serves_the_same_tools(self):
+    @_EVERY_INSTALL
+    def test_every_role_that_drives_a_browser_serves_the_same_tools(
+        self, monkeypatch: pytest.MonkeyPatch, install: str
+    ):
         # A tool present in one role and missing from another would disappear
         # from a client's list depending on how its server happened to start.
-        # The one exception is the sign-in view, which only a Direct server
-        # can show, and it adds exactly its four tools.
+        # The one exception is the sign-in view, which only the Docker image's
+        # Direct server shows, and it adds exactly its five tools.
         #
         # A proxy is deliberately not in here: it registers none of these and
         # serves the owner's instead, which is a different claim and has its own
         # test below.
+        _installed_as(monkeypatch, install)
+
         async def tool_names(role: ServerRole) -> set[str]:
             tools = await _server_for(role).list_tools()
             return {tool.name for tool in tools}
@@ -416,12 +441,14 @@ class TestServerRoles:
         direct = asyncio.run(tool_names(ServerRole.DIRECT))
         owner = asyncio.run(tool_names(ServerRole.OWNER))
 
-        assert direct - owner == {
+        view = {
             "open_login",
             "login_view_attach",
             "login_view_frame",
             "login_view_input",
+            "login_view_release",
         }
+        assert direct - owner == (view if install == "docker" else set())
         assert owner <= direct
         assert "get_person_profile" in owner
 

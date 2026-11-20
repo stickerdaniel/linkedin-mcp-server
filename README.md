@@ -108,7 +108,7 @@ Use code <strong>FOUNDING20</strong> for 20% off your first year. <a href="https
 | `search_posts` | Search posts by keyword, optionally filtered by recency or content type. |
 | `get_session_status` | Check your saved login and browser state without opening a browser. |
 | `close_session` | Close the shared browser session without deleting your saved login. |
-| `open_login` | Show the LinkedIn sign-in inside the chat, in clients that display MCP Apps. |
+| `open_login` | Docker: show the LinkedIn sign-in inside the chat, in clients that show MCP Apps. |
 
 <br/>
 <br/>
@@ -775,6 +775,27 @@ terminate HTTPS so the token never crosses the network in plain text.
 </details>
 
 </details>
+
+## Sign in outside the chat
+
+1. Run the login viewer and open the link it prints:
+
+   ```bash
+   docker run -it --rm \
+     -v ~/.linkedin-mcp:/home/pwuser/.linkedin-mcp \
+     -p 127.0.0.1:6080:6080 \
+     stickerdaniel/linkedin-mcp-server:latest --login --login-viewer
+   ```
+
+   Without Docker:
+
+   ```bash
+   uvx mcp-server-linkedin@latest --login
+   ```
+
+2. Ask the chat for your LinkedIn data again.
+
+If the login viewer reports that another client uses the browser, quit the MCP client once and run it again.
 
 <br/>
 <br/>

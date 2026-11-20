@@ -34,10 +34,13 @@ from test_login_app import (
     _frame,
     _images,
     _open_shown,
+    _release,
     _reply,
     _text,
     _ui_client,
     _until,
+    free_for_another_process,
+    hold_the_profile,
 )
 from test_server import _stand_in_the_lifespan
 
@@ -421,6 +424,7 @@ def login(short_root: Path, monkeypatch: pytest.MonkeyPatch) -> StandInLogin:
     """A Docker server's login on the short root, as in test_login_app."""
     stand_in = StandInLogin(short_root)
     _stand_in_the_lifespan(monkeypatch)
+    monkeypatch.setenv("LINKEDIN_MCP_RUNTIME", "docker")
     bootstrap.initialize_bootstrap("docker")
     monkeypatch.setattr(bootstrap, "interactive_login", stand_in)
     monkeypatch.setattr(bootstrap, "_ensure_browser_installed", AsyncMock())
@@ -720,6 +724,51 @@ class TestTwoServers:
         assert path is not None and not path.exists()
         assert here is not None
         assert len(_images(await _until(owner, here, "image"))) == 1
+
+    async def test_relayed_release_arguments_are_refused_without_their_values(
+        self, owner: Client, login: StandInLogin
+    ):
+        shown = await _open_shown(owner)
+
+        sent = await login_relay.forward(
+            "login_view_release",
+            {
+                "grant": "SYNTHETIC-GRANT" * 20,
+                "attempt_id": shown["attempt_id"],
+                "extra": "SYNTHETIC-EXTRA",
+            },
+            shown["attempt_id"],
+            deadline_s=3,
+        )
+
+        assert sent.envelope is not None and sent.envelope.is_error
+        assert (sent.envelope.meta or {})["linkedin.dev/error"][
+            "code"
+        ] == "invalid_argument"
+        for secret in ("SYNTHETIC-GRANT", "SYNTHETIC-EXTRA"):
+            assert secret not in sent.envelope.text
+        assert not login.cancelled
+
+
+async def test_a_relayed_release_frees_the_profile_the_owners_login_holds(
+    short_root: Path, monkeypatch: pytest.MonkeyPatch
+):
+    # One profile for the login, the relay socket and the other server's lease.
+    monkeypatch.setattr(bootstrap, "get_profile_dir", lambda: short_root)
+    browser = hold_the_profile(monkeypatch, short_root)
+    async with _ui_client(create_mcp_server()) as owner:
+        async with Client(create_mcp_server()) as other:
+            view = await _relayed_view_from(other, await _open_shown(owner))
+            await asyncio.wait_for(browser.opened.wait(), 10)
+            busy_before = not free_for_another_process(short_root)
+
+            released = await _release(other, view)
+            ended = _reply(await _frame(other, view))
+
+    assert busy_before
+    assert _reply(released) == {"access": "full", "release": "released"}
+    assert ended["access"] == "status" and ended["state"] == "cancelled"
+    assert free_for_another_process(short_root)
 
 
 async def _relayed_view_from(other: Client, shown: dict[str, str]) -> dict[str, str]:

@@ -33,15 +33,30 @@ PIXEL = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjC
 
 SDK_STAND_IN = """
 class App {
-  constructor() { window.bridge = this; this.calls = []; }
+  constructor() {
+    window.bridge = this;
+    this.calls = [];
+    this.links = [];
+    this.capabilities = { openLinks: {} };
+  }
   connect() { return new Promise((resolve) => { this.resolveConnect = resolve; }); }
   getHostContext() { return { theme: 'light' }; }
+  getHostCapabilities() { return this.capabilities; }
   callServerTool(params) {
     return new Promise((resolve, reject) => this.calls.push({ params, resolve, reject }));
+  }
+  openLink(params) {
+    return new Promise((resolve, reject) => this.links.push({ params, resolve, reject }));
   }
 }
 globalThis.linkedinLoginSdk = { App };
 """
+
+GUIDE = "https://github.com/stickerdaniel/linkedin-mcp-server#sign-in-outside-the-chat"
+RELEASED = "Continue in your browser, then ask for your LinkedIn data again."
+MAYBE_HELD = (
+    "Continue in your browser. If it reports a busy browser, quit this chat app once."
+)
 
 
 def shown(open_id: str = "O1", attempt_id: str = "A1") -> dict[str, Any]:
@@ -109,15 +124,19 @@ async def _serve(page: Any, html: str, *, host: str | None = None) -> None:
     await page.goto(f"{ORIGIN}/{'view' if host is None else 'host'}.html")
 
 
-@pytest.fixture
-async def viewer(browser_page: Any) -> Any:
-    """The page with the SDK stand-in, loaded and not yet connected."""
+async def _load_viewer(page: Any) -> Any:
     html = _template().replace(
         "<!--EXT_APPS_SDK-->", f'<script type="module">{SDK_STAND_IN}</script>', 1
     )
-    await _serve(browser_page, html)
-    await browser_page.wait_for_function("window.bridge !== undefined")
-    return browser_page
+    await _serve(page, html)
+    await page.wait_for_function("window.bridge !== undefined")
+    return page
+
+
+@pytest.fixture
+async def viewer(browser_page: Any) -> Any:
+    """The page with the SDK stand-in, loaded and not yet connected."""
+    return await _load_viewer(browser_page)
 
 
 async def calls(page: Any, name: str) -> list[dict[str, Any]]:
@@ -195,7 +214,27 @@ async def live(page: Any) -> None:
     await wait_for_calls(page, "login_view_frame", 1)
     await answer(page, "login_view_frame", 0, LIVE)
     await page.wait_for_function(
-        "document.getElementById('text').textContent.startsWith('Live.')"
+        "document.getElementById('text').textContent === 'Live'"
+    )
+
+
+async def links(page: Any) -> list[str]:
+    return await page.evaluate(
+        "bridge.links.map(link => link.params.url)", isolated_context=False
+    )
+
+
+async def answer_link(page: Any, index: int, result: dict[str, Any]) -> None:
+    await page.evaluate(
+        "([index, result]) => bridge.links[index].resolve(result)",
+        [index, result],
+        isolated_context=False,
+    )
+
+
+async def wait_for_text(page: Any, wanted: str) -> None:
+    await page.wait_for_function(
+        "wanted => document.getElementById('text').textContent === wanted", arg=wanted
     )
 
 
@@ -307,7 +346,7 @@ async def test_a_refused_attach_ends_with_the_way_out_and_no_retry(
 
     assert len(await calls(viewer, "login_view_attach")) == 1
     assert await calls(viewer, "login_view_frame") == []
-    assert await viewer.locator("#fallback").is_visible()
+    assert await viewer.locator("#outside").is_visible()
 
 
 async def test_an_attach_without_its_grant_ends_as_a_delivery_problem(viewer: Any):
@@ -328,7 +367,7 @@ async def test_an_attach_without_its_grant_ends_as_a_delivery_problem(viewer: An
 
     assert len(await calls(viewer, "login_view_attach")) == 1
     assert await calls(viewer, "login_view_frame") == []
-    assert await viewer.locator("#fallback").is_visible()
+    assert await viewer.locator("#outside").is_visible()
 
 
 async def test_a_lost_attach_is_retried_three_times_then_ends(viewer: Any):
@@ -344,7 +383,7 @@ async def test_a_lost_attach_is_retried_three_times_then_ends(viewer: Any):
     await viewer.wait_for_timeout(2000)
     assert len(await calls(viewer, "login_view_attach")) == 4
     assert await calls(viewer, "login_view_frame") == []
-    assert await viewer.locator("#fallback").is_visible()
+    assert await viewer.locator("#outside").is_visible()
 
 
 async def test_teardown_during_an_attach_retry_wait_attaches_no_more(viewer: Any):
@@ -369,13 +408,11 @@ async def test_an_unreachable_sign_in_ends_the_view_and_polls_no_more(viewer: An
 
     await answer(viewer, "login_view_frame", 1, frame(access="unavailable"))
     await viewer.wait_for_function("document.body.className.includes('ended')")
-    await viewer.click("#help")
-    await viewer.click("#help")
     await viewer.wait_for_timeout(600)
 
     assert "no longer reachable" in await viewer.locator("#text").inner_text()
     assert await viewer.locator("#screen").is_hidden()
-    assert await viewer.locator("#fallback").is_visible()
+    assert await viewer.locator("#outside").is_visible()
     assert len(await calls(viewer, "login_view_frame")) == 2
     assert await calls(viewer, "login_view_input") == []
 
@@ -567,20 +604,20 @@ async def sent_keys(page: Any) -> list[str]:
     ]
 
 
-async def test_tab_reaches_the_help_before_the_page_image(viewer: Any):
+async def test_tab_reaches_the_way_out_before_the_page_image(viewer: Any):
     await live(viewer)
-    # The help sits below the image on screen, so it must lead in the DOM.
-    help_box = await viewer.locator("#help").bounding_box()
+    # The button sits below the image on screen, so it must lead in the DOM.
+    button_box = await viewer.locator("#outside").bounding_box()
     screen_box = await viewer.locator("#screen").bounding_box()
-    assert help_box is not None and screen_box is not None
-    assert help_box["y"] >= screen_box["y"] + screen_box["height"]
+    assert button_box is not None and screen_box is not None
+    assert button_box["y"] >= screen_box["y"] + screen_box["height"]
 
     await viewer.keyboard.press("Tab")
 
-    assert await focused(viewer) == "help"
+    assert await focused(viewer) == "outside"
 
 
-async def test_escape_twice_leaves_the_page_for_the_help(viewer: Any):
+async def test_escape_twice_leaves_the_page_for_the_way_out(viewer: Any):
     await live(viewer)
     await viewer.focus("#screen")
     assert await focused(viewer) == "screen"
@@ -593,10 +630,7 @@ async def test_escape_twice_leaves_the_page_for_the_help(viewer: Any):
     await viewer.keyboard.press("Escape")
     await viewer.keyboard.press("Escape")
     await wait_for_calls(viewer, "login_view_input", 1)
-    assert await focused(viewer) == "help"
-
-    await viewer.keyboard.press("Enter")
-    assert await viewer.locator("#fallback").is_visible()
+    assert await focused(viewer) == "outside"
 
     # Let the first batch finish, then send a sentinel: whatever the queue held
     # behind the first Escape goes out before it.
@@ -615,6 +649,7 @@ async def test_escape_twice_leaves_the_page_for_the_help(viewer: Any):
         {"type": "key", "key": "Escape", "modifiers": []},
         {"type": "type", "text": "z"},
     ]
+    assert await calls(viewer, "login_view_release") == []
 
 
 async def test_one_escape_and_tab_still_reach_the_page(viewer: Any):
@@ -635,39 +670,140 @@ async def test_one_escape_and_tab_still_reach_the_page(viewer: Any):
     assert await sent_keys(viewer) == ["Escape", "Tab"]
 
 
-async def test_the_way_out_of_the_chat_is_reachable_while_live_and_after_expiry(
+async def test_the_way_out_is_one_line_while_live_and_stays_after_expiry(
     viewer: Any,
 ):
     await live(viewer)
-    fallback = viewer.locator("#fallback")
-    assert await fallback.is_hidden()
 
-    await viewer.click("#help")
-    assert await fallback.is_visible()
-    assert "--login --login-viewer" in await fallback.inner_text()
-    # The next live frame keeps it open.
+    assert await viewer.locator("#hint").is_visible()
+    assert await viewer.locator("#outside").inner_text() == "Sign in from your browser"
     await wait_for_calls(viewer, "login_view_frame", 2)
-    await answer(
-        viewer,
-        "login_view_frame",
-        1,
-        frame(access="full", state="signing_in", frame="unchanged"),
-    )
-    await wait_for_calls(viewer, "login_view_frame", 3)
-    assert await fallback.is_visible()
-    await viewer.click("#help")
-    assert await fallback.is_hidden()
-
-    await answer(viewer, "login_view_frame", 2, frame(access="expired"))
+    await answer(viewer, "login_view_frame", 1, frame(access="expired"))
     await viewer.wait_for_function(
         "document.getElementById('text').textContent.includes('expired')"
     )
-    assert await viewer.locator("#help").is_visible()
-    assert await fallback.is_visible()
-    await viewer.click("#help")
-    assert await fallback.is_hidden()
-    await viewer.click("#help")
-    assert await fallback.is_visible()
+
+    assert await viewer.locator("#outside").is_visible()
+    assert await viewer.locator("#hint").is_hidden()
+    for command in ("docker", "uvx", "--login"):
+        assert command not in await viewer.locator("body").inner_text()
+
+
+@pytest.mark.parametrize(
+    ("platform", "hint"),
+    [
+        ({"userAgentData": "macOS", "platform": "Linux x86_64"}, "⌘V pastes"),
+        ({"userAgentData": "Windows", "platform": "MacIntel"}, "Ctrl+V pastes"),
+        ({"userAgentData": None, "platform": "MacIntel"}, "⌘V pastes"),
+        ({"userAgentData": None, "platform": "Linux x86_64"}, "Ctrl+V pastes"),
+    ],
+    ids=[
+        "macOS",
+        "Windows",
+        "macOS without client hints",
+        "Linux without client hints",
+    ],
+)
+async def test_the_paste_hint_names_the_platforms_shortcut(
+    browser_page: Any, platform: dict[str, str | None], hint: str
+):
+    hints = json.dumps(platform["userAgentData"])
+    legacy = json.dumps(platform["platform"])
+    await browser_page.add_init_script(
+        f"""
+        Object.defineProperty(Navigator.prototype, 'userAgentData', {{
+            get: () => ({hints} === null ? undefined : {{ platform: {hints} }}),
+        }});
+        Object.defineProperty(Navigator.prototype, 'platform', {{ get: () => {legacy} }});
+        """
+    )
+    viewer = await _load_viewer(browser_page)
+
+    await live(viewer)
+
+    assert await viewer.locator("#hint").inner_text() == hint
+
+
+@pytest.mark.parametrize(
+    ("release", "message"),
+    [
+        ({"access": "full", "release": "released"}, RELEASED),
+        ({"access": "full", "release": "ending"}, MAYBE_HELD),
+        ({"access": "full", "release": "held"}, MAYBE_HELD),
+        ({"access": "expired"}, MAYBE_HELD),
+    ],
+    ids=["released", "ending", "held", "refused"],
+)
+async def test_the_button_ends_the_login_here_then_opens_the_guide(
+    viewer: Any, release: dict[str, str], message: str
+):
+    await live(viewer)
+
+    await viewer.click("#outside")
+    await wait_for_calls(viewer, "login_view_release", 1)
+    await viewer.wait_for_timeout(150)
+    assert await links(viewer) == []
+    await answer(viewer, "login_view_release", 0, frame(**release))
+    await viewer.wait_for_function("bridge.links.length === 1")
+    await answer_link(viewer, 0, {})
+    await wait_for_text(viewer, message)
+
+    assert await calls(viewer, "login_view_release") == [
+        {"grant": "G1", "attempt_id": "A1"}
+    ]
+    assert await links(viewer) == [GUIDE]
+    assert await viewer.locator("#screen").is_hidden()
+    assert await viewer.locator("#outside").is_visible()
+
+
+async def test_a_view_without_its_grant_only_opens_the_guide(viewer: Any):
+    await live(viewer)
+    await wait_for_calls(viewer, "login_view_frame", 2)
+    await answer(viewer, "login_view_frame", 1, frame(access="expired"))
+    await viewer.wait_for_function(
+        "document.getElementById('text').textContent.includes('expired')"
+    )
+
+    await viewer.click("#outside")
+    await viewer.wait_for_function("bridge.links.length === 1")
+    await answer_link(viewer, 0, {})
+    await wait_for_text(viewer, MAYBE_HELD)
+
+    assert await calls(viewer, "login_view_release") == []
+
+
+@pytest.mark.parametrize("failure", ["rejected", "no capability", "error result"])
+async def test_a_link_the_host_cannot_open_is_shown_to_copy(viewer: Any, failure: str):
+    await live(viewer)
+    if failure == "no capability":
+        await viewer.evaluate("bridge.capabilities = {}", isolated_context=False)
+
+    await viewer.click("#outside")
+    await wait_for_calls(viewer, "login_view_release", 1)
+    await answer(
+        viewer, "login_view_release", 0, frame(access="full", release="released")
+    )
+    if failure != "no capability":
+        await viewer.wait_for_function("bridge.links.length === 1")
+        if failure == "rejected":
+            await viewer.evaluate(
+                "bridge.links[0].reject(new Error('blocked'))", isolated_context=False
+            )
+        else:
+            await answer_link(viewer, 0, {"isError": True})
+    await wait_for_text(viewer, f"Open {GUIDE} in your browser.")
+
+    selected = await viewer.evaluate(
+        """() => {
+            const range = document.createRange();
+            range.selectNodeContents(document.getElementById('text'));
+            const selection = getSelection();
+            selection.removeAllRanges();
+            selection.addRange(range);
+            return selection.toString();
+        }"""
+    )
+    assert GUIDE in selected
 
 
 async def test_a_signed_in_login_leaves_one_line_and_no_image(viewer: Any):
@@ -686,7 +822,7 @@ async def test_a_signed_in_login_leaves_one_line_and_no_image(viewer: Any):
     await viewer.wait_for_timeout(150)
 
     assert await viewer.locator("#screen").is_hidden()
-    assert await viewer.locator("#fallback").is_hidden()
+    assert await viewer.locator("#outside").is_hidden()
     assert len(await calls(viewer, "login_view_frame")) == 2
 
 
@@ -701,8 +837,7 @@ async def test_an_error_result_shows_its_text_and_the_way_out(viewer: Any):
     await viewer.wait_for_function(
         "document.getElementById('text').textContent === 'Mount a host directory and try again.'"
     )
-    assert await viewer.locator("#fallback").is_visible()
-    assert "--login --login-viewer" in await viewer.locator("#fallback").inner_text()
+    assert await viewer.locator("#outside").is_visible()
     assert await calls(viewer, "login_view_frame") == []
 
 

@@ -38,7 +38,7 @@ logger = logging.getLogger(__name__)
 #: nothing else, so the browser serialization and the update notice leave them
 #: out; one spelling here keeps those exemptions and the registration in step.
 LOGIN_VIEW_TOOLS = frozenset(
-    {"login_view_attach", "login_view_frame", "login_view_input"}
+    {"login_view_attach", "login_view_frame", "login_view_input", "login_view_release"}
 )
 
 Outcome = Literal["signed_in", "restricted", "failed", "cancelled", "repaired_by_peer"]

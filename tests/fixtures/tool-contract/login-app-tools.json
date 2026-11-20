@@ -274,6 +274,43 @@
   {
     "_meta": {
       "fastmcp": {
+        "tags": []
+      },
+      "ui": {
+        "visibility": [
+          "app"
+        ]
+      }
+    },
+    "annotations": {
+      "openWorldHint": false,
+      "readOnlyHint": false
+    },
+    "description": "Called by the sign-in view: end the login, so it can run outside the chat.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "attempt_id": {
+          "maxLength": 64,
+          "type": "string"
+        },
+        "grant": {
+          "maxLength": 128,
+          "type": "string"
+        }
+      },
+      "required": [
+        "grant",
+        "attempt_id"
+      ],
+      "type": "object"
+    },
+    "name": "login_view_release",
+    "title": "Login View Release"
+  },
+  {
+    "_meta": {
+      "fastmcp": {
         "tags": [
           "session"
         ]

@@ -35,7 +35,7 @@ from linkedin_mcp_server.drivers.browser import (
 )
 from linkedin_mcp_server.daemon.auth_repair import OwnerAuthSignalMiddleware
 from linkedin_mcp_server.error_handler import ErrorCodeMiddleware, raise_tool_error
-from linkedin_mcp_server.login_app import register_login_app
+from linkedin_mcp_server.login_app import login_app_offered, register_login_app
 from linkedin_mcp_server.sequential_tool_middleware import (
     SequentialToolExecutionMiddleware,
 )
@@ -408,10 +408,12 @@ def create_mcp_server(
             except Exception as e:
                 raise_tool_error(e, "get_session_status")  # NoReturn
 
-    # Direct only. An owner has no client of its own to show a view to, and
-    # resources are not forwarded, so a proxy could offer the tools but never
-    # the page they belong to. Docker always runs Direct.
-    if role is ServerRole.DIRECT:
+    # The Docker image's Direct server only, the check `docker_auth_remedy` makes
+    # too, so no error names an unregistered `open_login`. An owner has no client
+    # of its own to show a view to, and resources are not forwarded, so a proxy
+    # could offer the tools but never the page they belong to. Docker always runs
+    # Direct.
+    if login_app_offered():
         register_login_app(mcp, tool_timeout=tool_timeout)
 
     return mcp

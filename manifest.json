@@ -147,10 +147,6 @@
     {
       "name": "close_session",
       "description": "Properly close browser session and clean up resources"
-    },
-    {
-      "name": "open_login",
-      "description": "Show the LinkedIn sign-in inside the chat, so the user signs in there"
     }
   ],
   "user_config": {

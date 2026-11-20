@@ -26,7 +26,7 @@ import sys
 import tempfile
 import threading
 import time
-from typing import Any, NoReturn, TextIO, TypeVar
+from typing import Any, Literal, NoReturn, TextIO, TypeVar
 from urllib.parse import urlsplit
 
 from fastmcp import Context
@@ -86,6 +86,7 @@ from linkedin_mcp_server.profile_lease import (
     ProfileLeaseUnavailableError,
     _release_locked_fd,
     acquire_locked_fd,
+    get_profile_lease,
 )
 from linkedin_mcp_server.server_role import (
     ServerRole,
@@ -4519,6 +4520,35 @@ def running_login_attempt() -> LoginAttempt | None:
 def current_login_attempt() -> LoginAttempt | None:
     """The attempt of the most recent login task, running or ended."""
     return _state.login_attempt
+
+
+Release = Literal["released", "ending", "held", "settled"]
+
+
+async def release_login(attempt_id: str, *, wait_s: float) -> Release:
+    """End the running login of attempt *attempt_id*, so another sign-in can start.
+
+    Only that attempt's login: its view closes, its task is cancelled once,
+    and the auto-import is left alone. Its relay endpoint stays for the status
+    tail. The wait for the login's cleanup is bounded by *wait_s* and never
+    cancels it again, so it restores the retired session even when the caller
+    gives up.
+
+    ``settled``: the attempt is not the one running here, nothing changed.
+    ``ending``: the cleanup still runs. ``held``: the login ended and this
+    process still holds the profile, as after a browser whose shutdown was not
+    confirmed. ``released``: the login ended and the profile is free.
+    """
+    attempt, task = _state.login_attempt, _state.login_task
+    if attempt is None or attempt.id != attempt_id or task is None or task.done():
+        return "settled"
+    attempt.close_view()
+    if not task.cancelling():
+        task.cancel()
+    await asyncio.wait({task}, timeout=wait_s)
+    if not task.done():
+        return "ending"
+    return "held" if get_profile_lease(get_profile_dir()).held else "released"
 
 
 async def stop_login() -> None:
