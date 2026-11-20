@@ -1374,9 +1374,9 @@ def advance_logout_epoch(
         _write_logout_epoch(profile_dir)
         if not _sweep_login_attempts(profile_dir):
             raise OSError(
-                "Logged out, but an abandoned login attempt under "
-                f"{auth_root_dir(profile_dir) / 'login-attempts'} could not be "
-                "removed; delete it by hand."
+                "Logged out, but an abandoned login attempt could not be "
+                "removed. Close every LinkedIn login window and run --logout "
+                "again."
             )
         return True
     finally:
