@@ -1331,11 +1331,10 @@ def _sweep_login_attempts(profile_dir: Path) -> bool:
     from linkedin_mcp_server.login_attempt import sweep_abandoned
 
     try:
-        sweep_abandoned(profile_dir)
+        return sweep_abandoned(profile_dir)
     except OSError as exc:
         logger.warning("Could not clear abandoned login attempts: %s", exc)
         return False
-    return True
 
 
 def advance_logout_epoch(
@@ -1357,6 +1356,8 @@ def advance_logout_epoch(
     Raises:
         ProfileRootRefusedError: The root is not one this server owns.
         RuntimeError: Another process held the profile past *wait_seconds*.
+        OSError: The epoch advanced, but an abandoned login attempt, which
+            holds cookies, could not be removed.
     """
     from linkedin_mcp_server.profile_lease import get_profile_lease
 
@@ -1371,7 +1372,12 @@ def advance_logout_epoch(
         if expect_empty and _source_session_present(profile_dir):
             return False
         _write_logout_epoch(profile_dir)
-        _sweep_login_attempts(profile_dir)
+        if not _sweep_login_attempts(profile_dir):
+            raise OSError(
+                "Logged out, but an abandoned login attempt under "
+                f"{auth_root_dir(profile_dir) / 'login-attempts'} could not be "
+                "removed; delete it by hand."
+            )
         return True
     finally:
         lease.release()

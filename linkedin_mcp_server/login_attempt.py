@@ -85,8 +85,15 @@ class PendingLogin:
         try:
             if _is_plain_directory(self.directory):
                 shutil.rmtree(self.directory)
-        finally:
-            _dispose_lock(self.lock_path, self.lock_fd)
+        except OSError as exc:
+            logger.warning(
+                "Could not remove login attempt %s, a later sweep retries: %s",
+                self.directory,
+                exc,
+            )
+            _release_locked_fd(self.lock_fd)
+            return
+        _dispose_lock(self.lock_path, self.lock_fd)
 
 
 def _is_plain(entry: os.stat_result) -> bool:
@@ -169,8 +176,8 @@ def _attempt_name(name: str) -> str | None:
     return stem if str(parsed) == stem else None
 
 
-def sweep(root: Path) -> None:
-    """Remove every abandoned attempt under *root*.
+def sweep(root: Path) -> bool:
+    """Remove every abandoned attempt under *root*, and say whether all went.
 
     An attempt is abandoned when its lock can be taken: a live owner, or a
     guardian still draining a crashed owner's browser, holds it. Chromium's
@@ -181,7 +188,8 @@ def sweep(root: Path) -> None:
     try:
         names = [entry.name for entry in os.scandir(root)]
     except FileNotFoundError:
-        return
+        return True
+    complete = True
     for name in names:
         stem = _attempt_name(name)
         if stem is None:
@@ -209,11 +217,13 @@ def sweep(root: Path) -> None:
                 "Could not remove abandoned login attempt %s: %s", directory, exc
             )
             _release_locked_fd(fd)
+            complete = False
             continue
         _dispose_lock(lock_path, fd)
+    return complete
 
 
-def sweep_abandoned(source_profile_dir: Path) -> None:
+def sweep_abandoned(source_profile_dir: Path) -> bool:
     """Remove abandoned attempts of *source_profile_dir*, as a logout does.
 
     Only a real ``login-attempts`` directory is swept: a planted link there
@@ -221,8 +231,7 @@ def sweep_abandoned(source_profile_dir: Path) -> None:
     their owners, which discard them once their browser has closed.
     """
     root = attempts_root(source_profile_dir)
-    if _is_plain_directory(root):
-        sweep(root)
+    return sweep(root) if _is_plain_directory(root) else True
 
 
 def open_pending_login(source_profile_dir: Path) -> PendingLogin:

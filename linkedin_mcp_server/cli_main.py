@@ -391,7 +391,7 @@ def clear_profile_and_exit() -> None:
                 expect_empty=True,
                 wait_seconds=PROFILE_HANDOVER_WAIT_SECONDS,
             )
-        except RuntimeError as e:
+        except (RuntimeError, OSError) as e:
             print(f"❌ {e}")
             sys.exit(1)
         if not advanced:

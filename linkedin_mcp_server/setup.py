@@ -214,25 +214,25 @@ async def _login_into_fresh_profile(
     print(f"   Please log in manually. You have {budget} to complete authentication.")
     print("   (This handles 2FA, captcha, and any security challenges)")
 
-    # The login browser must leave from the same address as later reads: a
-    # session created on one IP and used from another is what trips LinkedIn's
-    # security checkpoint. Shared with the runtime path rather than rebuilt
-    # here, so a setting cannot apply to page reading but not to the login that
-    # created the session.
-    launch_options, viewport = build_launch_options(config.browser)
-    describe_launch(launch_options)
-
-    manager = BrowserManager(
-        user_data_dir=pending.profile_dir,
-        headless=False,
-        slow_mo=config.browser.slow_mo,
-        viewport=viewport,
-        **launch_options,
-    )
-    viewer = LoginViewer() if login_viewer else None
+    viewer: LoginViewer | None = None
     failure: BaseException | None = None
     handed_over = False
     try:
+        # The login browser must leave from the same address as later reads: a session
+        # created on one IP and used from another is what trips LinkedIn's security
+        # checkpoint. Shared with the runtime path rather than rebuilt here, so a
+        # setting cannot apply to page reading but not to the login that created the
+        # session.
+        launch_options, viewport = build_launch_options(config.browser)
+        describe_launch(launch_options)
+        manager = BrowserManager(
+            user_data_dir=pending.profile_dir,
+            headless=False,
+            slow_mo=config.browser.slow_mo,
+            viewport=viewport,
+            **launch_options,
+        )
+        viewer = LoginViewer() if login_viewer else None
         if viewer is not None:
             viewer.start_window_manager()
         # ``_run_login`` opens the manager on its first line, so from here on

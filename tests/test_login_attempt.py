@@ -27,6 +27,7 @@ from linkedin_mcp_server.session_state import (
     advance_logout_epoch,
     clear_auth_state,
     load_source_state,
+    read_logout_epoch,
     portable_cookie_path,
     quarantine_dirs,
     source_state_path,
@@ -100,6 +101,21 @@ def _abandon(root: Path) -> str:
     (root / name / "profile").mkdir(parents=True)
     (root / f"{name}.lock").write_text("")
     return name
+
+
+@pytest.fixture
+def attempt_removal_fails(monkeypatch) -> Iterator[list[bool]]:
+    """Makes deleting anything under ``login-attempts`` fail while it holds True."""
+    failing = [True]
+    real = login_attempt.shutil.rmtree
+
+    def rmtree(path: Path, ignore_errors: bool = False) -> None:
+        if failing[0] and login_attempt.ATTEMPTS_DIR in Path(path).parts:
+            raise PermissionError("injected removal failure")
+        real(path, ignore_errors=ignore_errors)
+
+    monkeypatch.setattr(login_attempt.shutil, "rmtree", rmtree)
+    yield failing
 
 
 class TestPromotion:
@@ -403,6 +419,29 @@ class TestLogout:
 
         assert _entries(root) == []
 
+    def test_logout_reports_an_attempt_it_could_not_remove(
+        self, isolate_profile_dir, attempt_removal_fails
+    ):
+        _write_session(isolate_profile_dir)
+        root = attempts_root(isolate_profile_dir)
+        root.mkdir()
+        _abandon(root)
+
+        assert clear_auth_state(isolate_profile_dir) is False
+
+    def test_logout_with_no_stored_session_reports_an_attempt_it_could_not_remove(
+        self, isolate_profile_dir, attempt_removal_fails
+    ):
+        root = attempts_root(isolate_profile_dir)
+        root.mkdir()
+        _abandon(root)
+        before = read_logout_epoch(isolate_profile_dir)
+
+        with pytest.raises(OSError, match="could not be removed"):
+            advance_logout_epoch(isolate_profile_dir, expect_empty=True)
+
+        assert read_logout_epoch(isolate_profile_dir) != before
+
     @_POSIX_ONLY
     def test_logout_does_not_follow_a_linked_attempts_directory(
         self, isolate_profile_dir, tmp_path
@@ -425,6 +464,19 @@ class TestEndStates:
 
         pending.discard()
 
+        assert _entries(attempts_root(isolate_profile_dir)) == []
+
+    def test_an_attempt_that_could_not_be_deleted_is_swept_later(
+        self, isolate_profile_dir, opened, attempt_removal_fails
+    ):
+        pending = _open(opened, isolate_profile_dir)
+        _sign_in(pending)
+
+        pending.discard()
+        attempt_removal_fails[0] = False
+
+        assert pending.directory.exists()
+        assert sweep(attempts_root(isolate_profile_dir)) is True
         assert _entries(attempts_root(isolate_profile_dir)) == []
 
     def test_a_promoted_attempt_leaves_nothing(self, isolate_profile_dir, opened):

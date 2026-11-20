@@ -373,6 +373,33 @@ async def test_a_failed_login_leaves_the_source_as_it_was(
     assert _attempts_left(profile) == []
 
 
+def _fail_before_launch(**_kwargs):
+    raise RuntimeError("prelaunch configuration failure")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "target",
+    [
+        "linkedin_mcp_server.setup.build_launch_options",
+        "linkedin_mcp_server.setup.BrowserManager",
+    ],
+)
+async def test_a_login_that_fails_before_launch_leaves_no_attempt(
+    isolate_profile_dir, monkeypatch, target
+):
+    profile = isolate_profile_dir
+    _patch_login_deps(
+        monkeypatch, browser_factory=_factory(_make_browser(export_cookies=True))
+    )
+    monkeypatch.setattr(target, lambda *_args, **_kwargs: _fail_before_launch())
+
+    with pytest.raises(RuntimeError, match="prelaunch"):
+        await interactive_login(profile)
+
+    assert _attempts_left(profile) == []
+
+
 @pytest.mark.asyncio
 async def test_a_cancelled_login_leaves_the_source_as_it_was(
     isolate_profile_dir, monkeypatch
