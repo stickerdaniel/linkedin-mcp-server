@@ -21,6 +21,7 @@ from linkedin_mcp_server.core.proxy_errors import (
 )
 from linkedin_mcp_server.core.exceptions import (
     AccountRestrictedError,
+    InvalidAnswerError,
     InvalidReferenceError,
     AuthenticationError,
     ElementNotFoundError,
@@ -465,11 +466,11 @@ def _shape_tool_error(exception: Exception, context: str = "") -> NoReturn:
             code=ErrorCode.PAGE_UNREADABLE,
         )
 
-    # Ahead of the catch-all, which it subclasses. No issue diagnostics: a
-    # reference the caller can correct is not a bug worth reporting, and an
+    # Ahead of the catch-all, which they subclass. No issue diagnostics: an
+    # argument the caller can correct is not a bug worth reporting, and an
     # issue template appended to it buries the correction it already names.
-    elif isinstance(exception, InvalidReferenceError):
-        logger.info("Invalid reference%s: %s", ctx, exception)
+    elif isinstance(exception, (InvalidReferenceError, InvalidAnswerError)):
+        logger.info("Invalid argument%s: %s", ctx, exception)
         raise CodedToolError(str(exception), ErrorCode.INVALID_ARGUMENT) from exception
 
     elif isinstance(exception, (LinkedInOperationError, LinkedInMCPError)):

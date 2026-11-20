@@ -93,6 +93,10 @@
       "description": "Read the questions of a job posting's Easy Apply form without typing, submitting or keeping a draft"
     },
     {
+      "name": "submit_easy_apply",
+      "description": "Answer a job posting's Easy Apply form from caller-supplied answers, and send it when asked to"
+    },
+    {
       "name": "search_jobs",
       "description": "Search for jobs with filters like keywords and location"
     },
