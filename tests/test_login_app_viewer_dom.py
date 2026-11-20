@@ -54,6 +54,7 @@ globalThis.linkedinLoginSdk = { App };
 
 GUIDE = "https://github.com/stickerdaniel/linkedin-mcp-server#sign-in-outside-the-chat"
 RELEASED = "Continue in your browser, then ask for your LinkedIn data again."
+MAYBE_SENT = "That input may not have reached the page; check it before typing again."
 MAYBE_HELD = (
     "Continue in your browser. If it reports a busy browser, quit this chat app once."
 )
@@ -472,6 +473,24 @@ async def test_input_queued_behind_an_unknown_outcome_is_never_sent(
 
     sent = await calls(viewer, "login_view_input")
     assert sent[1]["events"] == [{"type": "type", "text": "x"}]
+
+
+async def test_an_interrupted_batch_warns_and_sends_nothing_behind_it(viewer: Any):
+    await live(viewer)
+
+    await viewer.click("#screen")
+    await wait_for_calls(viewer, "login_view_input", 1)
+    await viewer.keyboard.type("hunter2")
+    await answer(
+        viewer,
+        "login_view_input",
+        0,
+        frame(access="full", input="interrupted", applied=0),
+    )
+    await wait_for_text(viewer, MAYBE_SENT)
+    await viewer.wait_for_timeout(300)
+
+    assert len(await calls(viewer, "login_view_input")) == 1
 
 
 async def test_a_paste_is_sent_once_and_its_shortcut_is_not(viewer: Any):

@@ -489,6 +489,11 @@ async function pump() {
         end('problem', UNAVAILABLE);
         break;
       }
+      if (!ended && reply.input === 'interrupted') {
+        queue.length = 0;
+        show('problem', MAYBE_SENT);
+        break;
+      }
       if (!ended && reply.input === 'stale') {
         dropTarget(target);
         show('problem', STALE);
