@@ -164,6 +164,7 @@ def test_choosing_http_at_the_prompt_warns_about_an_exposed_bind(
         is_interactive=True, transport="stdio", transport_explicitly_set=False
     )
     config.server.host = "0.0.0.0"
+    config.server.allow_unauthenticated_http = True
     _patch_main_dependencies(monkeypatch, config)
     monkeypatch.setattr(
         "linkedin_mcp_server.cli_main.choose_transport_interactive",
@@ -1176,7 +1177,9 @@ class TestForwardingToASharedOwner:
 
         cli_main.main([])
 
-        assert set(built) == {"tool_timeout"}
+        assert {name for name, value in built.items() if value is not None} == {
+            "tool_timeout"
+        }
 
     def test_an_interactively_chosen_http_transport_elects_no_daemon(
         self, monkeypatch: pytest.MonkeyPatch

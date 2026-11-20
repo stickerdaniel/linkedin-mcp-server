@@ -18,6 +18,7 @@ import ctypes
 import errno
 import hashlib
 import json
+import math
 import os
 import socket
 import subprocess
@@ -293,6 +294,95 @@ async def test_a_black_hole_origin_is_a_navigation_stalled_before_its_response(
     assert record["stalled_phase"] == "response"
 
 
+#: A bound on waiting for a real browser to reach a phase, so one that never
+#: gets there fails instead of hanging. The tests assert the phase, not this.
+_PHASE_SECONDS = 60.0
+
+
+async def _cut_off_once(
+    page: Any, url: str, *reached: tuple[str, Callable[[Any], bool]]
+) -> None:
+    """Navigate *page* to *url* untimed, and cancel it once all of *reached* fired.
+
+    Each of *reached* is a page event and a test of its argument. A goto given
+    a deadline instead records whatever phase the host had got to by then: a
+    pause before the response spent a five second timeout before the commit,
+    and the record then showed a stall where none was. The goto still running
+    once the phases have arrived is what shows it stalled.
+    """
+    signals: list[asyncio.Event] = []
+    for event, test in reached:
+        happened = asyncio.Event()
+        signals.append(happened)
+
+        def fire(value: Any, test=test, happened=happened) -> None:
+            if test(value):
+                happened.set()
+
+        page.on(event, fire)
+    navigation = asyncio.ensure_future(
+        page.goto(url, wait_until="domcontentloaded", timeout=0)
+    )
+    try:
+        for happened in signals:
+            await asyncio.wait_for(happened.wait(), _PHASE_SECONDS)
+        assert not navigation.done(), "the navigation ended instead of stalling"
+    finally:
+        navigation.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await navigation
+
+
+#: The main frame's commit, which the recorder takes from the same event.
+_COMMITTED = ("framenavigated", lambda frame: frame.parent_frame is None)
+
+
+class _Target:
+    """A page or context that takes listeners and never fires them."""
+
+    def __init__(self, context: _Target | None = None) -> None:
+        self.context = context
+        self.pages: list[Any] = []
+
+    def on(self, event: str, handler: Callable[..., None]) -> None:
+        return None
+
+    def remove_listener(self, event: str, handler: Callable[..., None]) -> None:
+        return None
+
+
+async def test_a_goto_that_runs_out_its_timeout_is_recorded_as_one(tmp_path):
+    """How a timed out goto is recorded, apart from which phase it reached.
+
+    Patchright's own call is stood in by one that raises its TimeoutError, so
+    the record does not depend on how far a real browser got first. The phase
+    cases below cancel their goto instead, once the phase is reached.
+    """
+    path = tmp_path / FIRST_NAVIGATION_FILE
+
+    async def times_out(page: Any, url: str, **options: Any) -> None:
+        raise PlaywrightTimeoutError("Timeout 5000ms exceeded.")
+
+    page = _Target(context=_Target())
+    goto = first_navigation._wrap_goto(times_out)
+    with observe_navigation(path, label="timeout"):
+        with pytest.raises(PlaywrightTimeoutError):
+            await goto(
+                page,
+                "http://127.0.0.1:9/headers",
+                wait_until="domcontentloaded",
+                timeout=5_000,
+            )
+    record = _record(path)
+    (navigation,) = record["navigations"]
+    assert navigation["outcome"] == "TimeoutError"
+    assert navigation["timeout_ms"] == 5_000
+    assert navigation["ended_ms"] is not None
+    assert record["first_failed_navigation"] == 0
+    # Nothing was observed before it gave up, so the first phase is the stall.
+    assert record["stalled_phase"] == "request"
+
+
 @_browser_case
 async def test_headers_and_a_commit_then_a_stalled_document_stall_before_domcontentloaded(
     tmp_path,
@@ -301,16 +391,13 @@ async def test_headers_and_a_commit_then_a_stalled_document_stall_before_domcont
     with _Origin() as origin:
         with observe_navigation(path, label="headers"):
             async with _browser(tmp_path / "profile") as context:
-                with pytest.raises(PlaywrightTimeoutError):
-                    await context.pages[0].goto(
-                        origin.url("/headers"),
-                        wait_until="domcontentloaded",
-                        timeout=5_000,
-                    )
+                await _cut_off_once(
+                    context.pages[0], origin.url("/headers"), _COMMITTED
+                )
     record = _record(path)
     (navigation,) = record["navigations"]
     phases = navigation["phases"]
-    assert navigation["outcome"] == "TimeoutError"
+    assert navigation["outcome"] == "CancelledError"
     assert navigation["response_status"] == 200
     assert phases["request"] is not None
     assert phases["response"] is not None
@@ -333,12 +420,26 @@ async def test_a_parser_blocking_script_leaves_domcontentloaded_missing(tmp_path
         with _Origin() as origin:
             with observe_navigation(path, label="blocking"):
                 async with _browser(profile) as context:
-                    with pytest.raises(PlaywrightTimeoutError):
-                        await context.pages[0].goto(
-                            origin.url("/blocking"),
-                            wait_until="domcontentloaded",
-                            timeout=5_000,
-                        )
+                    await _cut_off_once(
+                        context.pages[0],
+                        origin.url("/blocking"),
+                        _COMMITTED,
+                        (
+                            "request",
+                            lambda request: request.url.endswith("/stalled.js"),
+                        ),
+                    )
+                    # The cut-off navigation is quick, so the browser could close
+                    # before the sampler ever saw it; the lifetimes asserted below
+                    # need both processes identified while they still run.
+                    await _sampled(
+                        lifetimes,
+                        lambda document: (
+                            {p["role"] for p in document.get("processes", [])}
+                            >= {"browser-root", "driver"}
+                        ),
+                        "the browser root and driver were not identified",
+                    )
     finally:
         lifetimes.stop(exc=None, requested=requested_ends(path))
     record = _record(path)
@@ -484,7 +585,12 @@ async def test_a_relaunch_keeps_the_first_launch_and_reads_its_own_ends(
 
 
 @_browser_case
-async def test_observers_detach_and_the_sampler_stops_within_its_bound(tmp_path):
+async def test_observers_detach_and_the_sampler_stops(tmp_path):
+    """Whether the stop kept to its bound is the slow process table case's.
+
+    Here the stop's own report is diagnostics: a host that stalls the closing
+    sample makes ``stopped_within_bound`` false while nothing stayed attached.
+    """
     evidence = tmp_path / "evidence"
     profile = tmp_path / "profile"
     path = evidence / FIRST_NAVIGATION_FILE
@@ -514,11 +620,11 @@ async def test_observers_detach_and_the_sampler_stops_within_its_bound(tmp_path)
     assert record["observer"]["detach_failures"] == 0
     assert record["observer"]["errors"] == 0
     sampled = _record(evidence / BROWSER_LIFETIMES_FILE)
-    assert sampled["stopped_within_bound"] is True
-    assert sampled["stop_seconds"] <= STOP_SECONDS
-    assert not any(
-        thread.name == f"lifetimes-{label}" for thread in threading.enumerate()
-    )
+    assert isinstance(sampled["stopped_within_bound"], bool), "the stop never ended"
+    samplers = [t for t in threading.enumerate() if t.name == f"lifetimes-{label}"]
+    for sampler in samplers:
+        sampler.join(SAMPLER_STALL_SECONDS)
+    assert not any(sampler.is_alive() for sampler in samplers)
 
 
 # --- A staging process that never finished ----------------------------------------
@@ -941,18 +1047,133 @@ class _SlowChild:
         return ["not-chromium"]
 
 
+class _ReadClock:
+    """A monotonic clock that only process reads move, and a join that keeps to it.
+
+    The sampler's deadlines and the stop's bound are read from it, so which
+    reads fit inside a bound follows from how long each read says it took,
+    never from how long the host took to run it. A read that would carry the
+    clock past a waiting join's timeout stops the clock there and stays under
+    way until :meth:`release`, as a read still running when a real join gives
+    up does.
+    """
+
+    def __init__(self) -> None:
+        self._now = 0.0
+        self._until = math.inf
+        self._overran = False
+        self._released = threading.Event()
+        self._moved = threading.Condition()
+
+    def monotonic(self) -> float:
+        with self._moved:
+            return self._now
+
+    def advance(self, seconds: float) -> None:
+        with self._moved:
+            if self._now + seconds <= self._until:
+                self._now += seconds
+                return
+            self._now = self._until
+            self._overran = True
+            self._moved.notify_all()
+        self._released.wait(SAMPLER_STALL_SECONDS)
+
+    def join(self, thread: threading.Thread, timeout: float) -> None:
+        """``thread.join(timeout)``, with *timeout* counted on this clock."""
+        stalled_after = time.monotonic() + SAMPLER_STALL_SECONDS
+        with self._moved:
+            self._until = self._now + timeout
+            while thread.is_alive() and not self._overran:
+                assert time.monotonic() < stalled_after, "the sampler made no progress"
+                self._moved.wait(0.01)
+            self._until = math.inf
+
+    def release(self) -> None:
+        """Let a read the join gave up on finish."""
+        self._released.set()
+
+
+class _ChildReadOnTheClock:
+    """A descendant whose every read takes *delay* on *clock*.
+
+    Each read sets *reading* and then waits for *stopping*, so a stop that
+    waits for *reading* lands in the middle of a slow sample.
+    """
+
+    def __init__(
+        self,
+        pid: int,
+        clock: _ReadClock,
+        delay: float,
+        *,
+        reading: threading.Event,
+        stopping: threading.Event,
+    ) -> None:
+        self.pid = pid
+        self._clock = clock
+        self._delay = delay
+        self._reading = reading
+        self._stopping = stopping
+
+    def create_time(self) -> float:
+        self._reading.set()
+        assert self._stopping.wait(SAMPLER_STALL_SECONDS), "the stop never began"
+        self._clock.advance(self._delay)
+        return 1.0
+
+    def status(self) -> str:
+        return psutil.STATUS_RUNNING
+
+    def cmdline(self) -> list[str]:
+        return ["not-chromium"]
+
+
 def test_a_slow_process_table_cannot_hold_the_stop_past_its_bound(
     tmp_path, monkeypatch
 ):
-    # One full sample here takes six seconds, three times the stop bound.
-    slow = [_SlowChild(pid, 0.3) for pid in range(100_000, 100_020)]
-    _list_descendants(monkeypatch, slow)
+    # One full sample here takes six seconds, three times the stop bound. The
+    # closing sample gives way at half the bound, so the sampler ends inside it.
+    clock = _ReadClock()
     label = f"slow-{os.getpid()}"
-    lifetimes = LifetimeSampler(
-        tmp_path / BROWSER_LIFETIMES_FILE, profile=tmp_path / "profile", label=label
-    ).start()
-    time.sleep(0.5)
-    lifetimes.stop(exc=None, requested=None)
+    with monkeypatch.context() as patched:
+        patched.setattr(
+            first_navigation,
+            "time",
+            SimpleNamespace(
+                monotonic=clock.monotonic,
+                monotonic_ns=time.monotonic_ns,
+                time=time.time,
+                sleep=time.sleep,
+            ),
+        )
+        lifetimes = LifetimeSampler(
+            tmp_path / BROWSER_LIFETIMES_FILE, profile=tmp_path / "profile", label=label
+        )
+        reading = threading.Event()
+        slow = [
+            _ChildReadOnTheClock(
+                pid, clock, 0.3, reading=reading, stopping=lifetimes._halt
+            )
+            for pid in range(100_000, 100_020)
+        ]
+        _list_descendants(patched, slow)
+        thread = lifetimes._thread
+        patched.setattr(
+            lifetimes,
+            "_thread",
+            SimpleNamespace(
+                start=thread.start,
+                is_alive=thread.is_alive,
+                join=lambda timeout: clock.join(thread, timeout),
+            ),
+        )
+        lifetimes.start()
+        assert reading.wait(SAMPLER_STALL_SECONDS), "the sampler never read a child"
+        try:
+            lifetimes.stop(exc=None, requested=None)
+        finally:
+            clock.release()
     sampled = _record(tmp_path / BROWSER_LIFETIMES_FILE)
     assert sampled["stopped_within_bound"] is True
     assert sampled["stop_seconds"] <= STOP_SECONDS

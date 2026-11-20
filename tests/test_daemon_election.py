@@ -283,6 +283,49 @@ def _attachment_for(profile: Path, config: AppConfig, port: int) -> Attachment:
     return Attachment(descriptor=descriptor, token=token)
 
 
+def _elect_on_a_controlled_clock(
+    monkeypatch: pytest.MonkeyPatch, *, read_seconds: float = 0.0
+) -> list[float]:
+    """Run the election's descriptor reads inline, on a clock only the election moves.
+
+    Each read is the real ``_inspect`` on the calling thread and costs
+    *read_seconds* of the clock; each clock reading costs a millisecond and each
+    pause its own length. A scheduler stall then lengthens nothing the election
+    measures, so a budget of a tenth of a second is spent by the code rather than
+    by the runner. Returns the clock, which tests read after the election.
+
+    The real reader thread and its timeout are covered in ``TestFailingFast``.
+    """
+    clock = [0.0]
+
+    class Inspector:
+        def __init__(
+            self, auth_root: Path, profile: Path, config: AppConfig, **_: object
+        ) -> None:
+            self._args = (auth_root, profile, config)
+
+        def require_fresh_inspection(self) -> None:
+            return None
+
+        def inspect_until(self, *, timeout: float) -> OwnerLookup:
+            clock[0] += read_seconds
+            return daemon_module._inspect(*self._args)
+
+    def monotonic() -> float:
+        now = clock[0]
+        clock[0] += 0.001
+        return now
+
+    def sleep(seconds: float) -> None:
+        clock[0] += seconds
+
+    monkeypatch.setattr(election_module, "_DescriptorInspector", Inspector)
+    monkeypatch.setattr(
+        election_module, "time", SimpleNamespace(monotonic=monotonic, sleep=sleep)
+    )
+    return clock
+
+
 @contextlib.contextmanager
 def _a_healthy_owner(profile: Path, config: AppConfig, monkeypatch: pytest.MonkeyPatch):
     """The owner's real HTTP server, on loopback, inside this process.
@@ -370,7 +413,9 @@ class TestThePublicationProbe:
 class TestLiveness:
     """A descriptor is a file. Only a request that is answered is a process."""
 
-    def test_a_crashed_owners_descriptor_is_not_handed_back(self, tmp_path: Path):
+    def test_a_crashed_owners_descriptor_is_not_handed_back(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
         # Reproduced against a real owner before this was fixed: the process was
         # killed, and the next election read its leftovers as attachable and
         # returned the dead endpoint. Every check passes on that file, because
@@ -379,6 +424,12 @@ class TestLiveness:
         config = _config(profile)
         auth_root = profile.parent
         _publish_stale_owner(auth_root, profile, config)
+        _elect_on_a_controlled_clock(monkeypatch)
+        # A real start would key its state under the account's own home, out of
+        # this test's reach. Failing it leaves the dead endpoint the only one.
+        monkeypatch.setattr(
+            spawn_module, "_start_owner", lambda *a, **k: Attempt.FAILED
+        )
 
         outcome = obtain_owner(
             auth_root,
@@ -417,12 +468,18 @@ class TestLiveness:
         assert descriptor_file.exists()
 
     def test_a_reachable_owner_is_attached_to_without_starting_anything(
-        self, tmp_path: Path
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ):
         profile = _profile(tmp_path)
         config = _config(profile)
         auth_root = profile.parent
         _publish_stale_owner(auth_root, profile, config)
+        _elect_on_a_controlled_clock(monkeypatch)
+        monkeypatch.setattr(
+            spawn_module,
+            "_start_owner",
+            lambda *a, **k: pytest.fail("an owner was started beside a live one"),
+        )
 
         outcome = obtain_owner(
             auth_root,
@@ -618,7 +675,9 @@ class TestSilenceIsNotDeath:
         assert outcome.worth_connecting, outcome.attachment_lookup.reason
         assert len(probes) >= 3, "the owner was written off before it answered"
 
-    def test_a_silence_is_reported_as_its_own_state(self, tmp_path: Path):
+    def test_a_silence_is_reported_as_its_own_state(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
         """Which refusal it was, not merely that there was one.
 
         The original failure was diagnosed from this string, and reusing the
@@ -629,6 +688,12 @@ class TestSilenceIsNotDeath:
         config = _config(profile)
         auth_root = profile.parent
         _publish_stale_owner(auth_root, profile, config)
+        _elect_on_a_controlled_clock(monkeypatch)
+        # A real start would key its state under the account's own home, out of
+        # this test's reach. Failing it leaves the published endpoint the only one.
+        monkeypatch.setattr(
+            spawn_module, "_start_owner", lambda *a, **k: Attempt.FAILED
+        )
 
         silent = obtain_owner(
             auth_root,
@@ -1181,8 +1246,8 @@ class TestFailingFast:
         monkeypatch.setattr(election_module, "_OWNER_START_BURST", 1)
         monkeypatch.setattr(election_module, "_OWNER_START_RETRY_SECONDS", 0.05)
         monkeypatch.setattr(election_module, "_MAX_OWNER_START_RETRY_SECONDS", 0.2)
+        clock = _elect_on_a_controlled_clock(monkeypatch)
 
-        started = time.monotonic()
         outcome = obtain_owner(
             auth_root,
             profile,
@@ -1191,12 +1256,12 @@ class TestFailingFast:
             settlement_seconds=0,
             connect=lambda attachment, timeout: Reach.REFUSED,
         )
-        elapsed = time.monotonic() - started
 
         assert not outcome.worth_connecting
         assert 2 <= attempts <= 4
-        assert elapsed >= 0.65, f"the election gave up after {elapsed:.2f}s"
-        assert elapsed < 2, elapsed
+        # Entered at zero, so the clock is the election's whole run.
+        assert clock[0] >= 0.7, f"the election gave up after {clock[0]:.3f}s"
+        assert clock[0] < 0.75, clock[0]
 
     @pytest.mark.parametrize(
         "refusal",
@@ -6136,6 +6201,7 @@ class TestVersionSkew:
         original = dict(os_module.environ)
         os_module.environ["PROXY_PASSWORD"] = "hunter2"
         os_module.environ["PROXY_USERNAME"] = "someone"
+        os_module.environ["LINKEDIN_MCP_HTTP_TOKEN"] = "t" * 32
         try:
             handed = spawn_module._owner_environment()
         finally:
@@ -6144,6 +6210,7 @@ class TestVersionSkew:
 
         assert "PROXY_PASSWORD" not in handed
         assert "PROXY_USERNAME" not in handed
+        assert "LINKEDIN_MCP_HTTP_TOKEN" not in handed
         # And the rest of the environment still crosses: the owner needs PATH,
         # HOME and the rest to run at all.
         assert "PATH" in handed
@@ -8144,6 +8211,9 @@ class TestElectionSettlement:
             probe_budgets.append(timeout)
             return Reach.ANSWERED
 
+        # The read spends most of the settlement window, so a probe given a
+        # window of its own would get more than what is left after it.
+        _elect_on_a_controlled_clock(monkeypatch, read_seconds=0.03)
         outcome = obtain_owner(
             profile.parent,
             profile,
@@ -8155,7 +8225,7 @@ class TestElectionSettlement:
 
         assert outcome.worth_connecting
         assert len(probe_budgets) == 1
-        assert 0 < probe_budgets[0] <= 0.05 + 1e-12
+        assert 0 < probe_budgets[0] <= 0.05 - 0.03, probe_budgets
 
     def test_zero_total_budget_starts_no_operation(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

@@ -130,6 +130,42 @@ class ConfigurationError(Exception):
     """Raised when configuration validation fails."""
 
 
+#: Shortest HTTP client token accepted: what ``openssl rand -hex 16`` prints.
+#: A token a person can type from memory is shorter.
+MIN_HTTP_TOKEN_LENGTH = 32
+
+# Both places a token can come from, because a refusal cannot say which one
+# applied without carrying the source along with the secret.
+_HTTP_TOKEN_SOURCES = "LINKEDIN_MCP_HTTP_TOKEN or --http-token-file"
+
+
+def _check_http_token(token: str) -> None:
+    """Refuse an HTTP client token that cannot work or can be guessed.
+
+    Printable ASCII without spaces, because an ``Authorization`` header carries
+    it and a client trims or cannot send anything else, so such a token could
+    never match. No message names any part of it: configuration errors are
+    printed to the console and pasted into issue reports.
+    """
+    if not token.strip():
+        problem = "is empty or only whitespace"
+    elif not all("!" <= character <= "~" for character in token):
+        problem = (
+            "may hold only printable ASCII without spaces or line breaks, "
+            "because an Authorization header carries it"
+        )
+    elif len(token) < MIN_HTTP_TOKEN_LENGTH:
+        problem = (
+            f"is shorter than {MIN_HTTP_TOKEN_LENGTH} characters. Generate one "
+            "with: openssl rand -hex 32"
+        )
+    else:
+        return
+    raise ConfigurationError(
+        f"The HTTP client token from {_HTTP_TOKEN_SOURCES} {problem}."
+    )
+
+
 @dataclass
 class BrowserConfig:
     """Configuration for browser settings."""
@@ -418,6 +454,13 @@ class ServerConfig:
     host: str = "127.0.0.1"
     port: int = 8000
     path: str = "/mcp"
+    # The bearer token every HTTP client must present. Out of the repr for the
+    # reason the proxy credentials are: cli_main logs the whole config at DEBUG.
+    # A credential of its own, never the daemon owner's loopback token.
+    http_token: str | None = field(default=None, repr=False)
+    # Serve HTTP beyond loopback without a token. Unsafe, and for an operator
+    # who restricts the port by other means.
+    allow_unauthenticated_http: bool = False
     tool_timeout_seconds: float = DEFAULT_TOOL_TIMEOUT_SECONDS
     # Serve every stdio client from one browser-owning process instead of
     # giving each its own. Off while the supervision and liveness work is
@@ -485,30 +528,42 @@ class AppConfig:
             raise ConfigurationError("HTTP transport requires a valid host")
         if not self.server.port:
             raise ConfigurationError("HTTP transport requires a valid port")
-        if not is_loopback_host(self.server.host):
-            # Warned about rather than refused, and the distinction is not
-            # timidity. A container has to bind the wildcard: a process bound to
-            # 127.0.0.1 inside one is unreachable through a published port at
-            # all, so refusing this would break the documented Docker command
-            # while protecting nobody. What actually decides exposure is the
-            # publish address on the host, and this process cannot see it --
-            # `-p 127.0.0.1:8080:8080` and `-p 8080:8080` look identical from in
-            # here. Container detection is no way out either, since
-            # LINKEDIN_MCP_CONTAINER is a full override and therefore not a
-            # security boundary. So the honest thing is to say what it costs and
-            # name both remedies.
-            logger.warning(
-                "HTTP transport is binding to %s, which is reachable from "
-                "outside this machine. The MCP endpoint has no authentication, "
-                "so anyone who can reach that address can use your LinkedIn "
-                "session. Host and origin checking is not access control; it "
-                "stops a website from pointing a name at this server, not "
-                "someone who can reach the address. Outside Docker, use "
-                "--host 127.0.0.1. In Docker, keep --host 0.0.0.0 and publish "
-                "to loopback instead: -p 127.0.0.1:PORT:PORT. For remote "
-                "access, forward the port over SSH rather than exposing it.",
-                self.server.host,
+        if self.server.http_token is not None:
+            _check_http_token(self.server.http_token)
+        if is_loopback_host(self.server.host) or self.server.http_token is not None:
+            return
+        # Refused without a token rather than warned about. A container has to
+        # bind the wildcard, and this process cannot see whether Docker
+        # published the port on loopback or on every interface: `-p
+        # 127.0.0.1:8080:8080` and `-p 8080:8080` look identical from in here.
+        # LINKEDIN_MCP_CONTAINER is no way out either, since it is a full
+        # override and therefore not a security boundary. So the token is what
+        # makes a wildcard bind safe, and serving without one takes a setting
+        # whose name says what it costs.
+        if not self.server.allow_unauthenticated_http:
+            raise ConfigurationError(
+                f"HTTP transport on {self.server.host} is reachable from outside "
+                "this machine, and no client token is set. Set "
+                "LINKEDIN_MCP_HTTP_TOKEN or --http-token-file and send "
+                "'Authorization: Bearer <token>' from the client; in Docker, "
+                "pass it with -e LINKEDIN_MCP_HTTP_TOKEN. Outside Docker you can "
+                "bind to loopback instead: --host 127.0.0.1. "
+                "LINKEDIN_MCP_ALLOW_UNAUTHENTICATED_HTTP=true starts without a "
+                "token, which is unsafe: anyone who reaches the port can use "
+                "your LinkedIn session."
             )
+        logger.warning(
+            "HTTP transport is binding to %s, which is reachable from outside "
+            "this machine, and LINKEDIN_MCP_ALLOW_UNAUTHENTICATED_HTTP is set. "
+            "The MCP endpoint has no authentication, so anyone who can reach "
+            "that address can use your LinkedIn session. Host and origin "
+            "checking is not access control; it stops a website from pointing a "
+            "name at this server, not someone who can reach the address. Set "
+            "LINKEDIN_MCP_HTTP_TOKEN to require a bearer token, or keep the port "
+            "on loopback: --host 127.0.0.1 outside Docker, -p "
+            "127.0.0.1:PORT:PORT in Docker.",
+            self.server.host,
+        )
 
     def _validate_port_range(self) -> None:
         """Validate port is in valid range."""

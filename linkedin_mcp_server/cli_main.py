@@ -917,11 +917,20 @@ def main(argv: Sequence[str] | None = None) -> None:
             # Create and run the MCP server
             from linkedin_mcp_server.daemon.discovery import Unanswered
 
+            # Only an HTTP listener has clients to authenticate. Under stdio
+            # the client is the process that started this one.
+            http_token = (
+                config.server.http_token if transport == "streamable-http" else None
+            )
             if shared is None:
-                mcp = create_mcp_server(tool_timeout=config.server.tool_timeout_seconds)
+                mcp = create_mcp_server(
+                    tool_timeout=config.server.tool_timeout_seconds,
+                    http_token=http_token,
+                )
             elif isinstance(shared, Unanswered):
                 mcp = create_mcp_server(
                     tool_timeout=config.server.tool_timeout_seconds,
+                    http_token=http_token,
                     silent_owner=shared,
                 )
             else:
