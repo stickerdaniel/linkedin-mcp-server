@@ -9,6 +9,13 @@
     {
       "call": "get_inbox",
       "callback_id": "callback-1",
+      "event": "response",
+      "kind": "listener.add",
+      "section": "conversation"
+    },
+    {
+      "call": "get_inbox",
+      "callback_id": "callback-2",
       "event": "framenavigated",
       "kind": "listener.add",
       "section": "conversation"
@@ -57,7 +64,7 @@
     },
     {
       "call": "get_inbox",
-      "callback_id": "callback-1",
+      "callback_id": "callback-2",
       "event": "framenavigated",
       "kind": "listener.remove",
       "section": "conversation"
@@ -115,7 +122,14 @@
     },
     {
       "call": "get_inbox",
-      "callback_id": "callback-2",
+      "callback_id": "callback-3",
+      "event": "response",
+      "kind": "listener.remove",
+      "section": "conversation"
+    },
+    {
+      "call": "get_inbox",
+      "callback_id": "callback-4",
       "event": "framenavigated",
       "kind": "listener.add",
       "section": "conversation"
@@ -164,7 +178,7 @@
     },
     {
       "call": "get_inbox",
-      "callback_id": "callback-2",
+      "callback_id": "callback-4",
       "event": "framenavigated",
       "kind": "listener.remove",
       "section": "conversation"
