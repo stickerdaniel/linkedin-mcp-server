@@ -905,7 +905,8 @@ class TestALoginDoesNotHoldTheProfile:
         from linkedin_mcp_server.session_state import load_source_state
         from linkedin_mcp_server.setup import interactive_login
 
-        holder = _hold_profile(isolate_profile_dir.parent, seconds=1.5)
+        holder = _hold_profile(isolate_profile_dir.parent, seconds=2.0)
+        held_since = time.monotonic()
         held_at_launch: list[bool] = []
 
         def note(_pending) -> None:
@@ -919,7 +920,7 @@ class TestALoginDoesNotHoldTheProfile:
 
         try:
             assert await interactive_login(isolate_profile_dir) is True
-            assert holder.poll() is not None
+            assert time.monotonic() - held_since >= 1.0
         finally:
             holder.wait(timeout=10)
 
