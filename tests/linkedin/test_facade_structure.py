@@ -21,6 +21,7 @@ PACKAGE = ROOT / "linkedin_mcp_server"
 LINKEDIN = PACKAGE / "linkedin"
 EXTRACTOR = LINKEDIN / "extractor.py"
 FACADE_PACKAGE_IMPORTERS = {
+    Path("tests/linkedin/test_post_publishing_facade.py"),
     Path("linkedin_mcp_server/dependencies.py"),
     Path("tests/linkedin/policy_scenarios.py"),
     Path("tests/linkedin/test_facade_contracts.py"),
@@ -30,6 +31,8 @@ FACADE_PACKAGE_IMPORTERS = {
 }
 
 PUBLIC_SIGNATURES = {
+    "prepare_post": "(self, text: 'str') -> 'dict[str, Any]'",
+    "publish_post": "(self, draft_id: 'str', approved_text: 'str', *, confirmed: 'bool' = False) -> 'dict[str, Any]'",
     "click_button_by_text": "(self, text: 'str', *, scope: 'str' = 'main', timeout: 'int' = 5000) -> 'bool'",
     "connect_with_person": "(self, username: 'str', *, note: 'str | None' = None) -> 'dict[str, Any]'",
     "extract_feed": "(self, num_posts: 'int' = 10) -> 'ExtractedSection'",
@@ -58,6 +61,8 @@ PUBLIC_SIGNATURES = {
 }
 
 DELEGATES = {
+    "prepare_post": ("_post_writer", "prepare_post"),
+    "publish_post": ("_post_writer", "publish"),
     "click_button_by_text": ("_content", "click_button_by_text"),
     "connect_with_person": ("_connection", "connect_with_person"),
     "extract_feed": ("_feed", "extract_feed"),
@@ -86,6 +91,8 @@ DELEGATES = {
 }
 
 DELEGATE_CALLS = {
+    "prepare_post": "self._post_writer.prepare_post(text)",
+    "publish_post": "self._post_writer.publish(draft_id, approved_text, confirmed=confirmed)",
     "click_button_by_text": "self._content.click_button_by_text(text, scope=scope, timeout=timeout)",
     "connect_with_person": "self._connection.connect_with_person(username, note=note)",
     "extract_feed": "self._feed.extract_feed(num_posts)",
@@ -114,6 +121,7 @@ DELEGATE_CALLS = {
 }
 
 FACADE_STATE = {
+    "_post_writer",
     "_capture",
     "_company",
     "_connection",

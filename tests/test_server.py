@@ -84,7 +84,7 @@ _THE_OWNER_IS_GONE = (
 #: server: the contract is this text, including the write-authorization rule
 #: and the user-owned verification step.
 _THE_OPERATING_RULES = """\
-send_message and connect_with_person act for the user. Use them only for the
+send_message, connect_with_person and publish_post act for the user. Use them only for the
 exact action, recipient and text the user approved; when the user asks for a
 draft, or for something these tools cannot do, reply with the text instead. If
 a write's outcome is unknown, ask the user to check LinkedIn before acting

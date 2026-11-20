@@ -72,6 +72,14 @@
         "coroutine": true,
         "signature": "(self, username: 'str') -> 'dict[str, Any]'"
       },
+      "prepare_post": {
+        "coroutine": true,
+        "signature": "(self, text: 'str') -> 'dict[str, Any]'"
+      },
+      "publish_post": {
+        "coroutine": true,
+        "signature": "(self, draft_id: 'str', approved_text: 'str', *, confirmed: 'bool' = False) -> 'dict[str, Any]'"
+      },
       "read_company": {
         "coroutine": true,
         "signature": "(self, company_name: 'str', requested: 'set[str]', callbacks: 'ProgressCallback | None' = None) -> 'dict[str, Any]'"
@@ -127,6 +135,8 @@
       "get_my_profile",
       "get_saved_jobs",
       "get_sidebar_profiles",
+      "prepare_post",
+      "publish_post",
       "read_company",
       "read_job",
       "read_person",
@@ -586,6 +596,50 @@
           },
           "required": [
             "linkedin_username"
+          ],
+          "type": "object"
+        },
+        "output": {
+          "additionalProperties": true,
+          "type": "object"
+        }
+      },
+      "prepare_post": {
+        "input": {
+          "additionalProperties": false,
+          "properties": {
+            "text": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "text"
+          ],
+          "type": "object"
+        },
+        "output": {
+          "additionalProperties": true,
+          "type": "object"
+        }
+      },
+      "publish_post": {
+        "input": {
+          "additionalProperties": false,
+          "properties": {
+            "approved_text": {
+              "type": "string"
+            },
+            "confirmed": {
+              "default": false,
+              "type": "boolean"
+            },
+            "draft_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "draft_id",
+            "approved_text"
           ],
           "type": "object"
         },

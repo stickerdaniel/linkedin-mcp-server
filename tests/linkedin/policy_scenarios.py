@@ -24,6 +24,7 @@ from linkedin_mcp_server.linkedin import job_pages as job_pages_module
 from linkedin_mcp_server.linkedin import jobs as jobs_module
 from linkedin_mcp_server.linkedin import navigation as navigation_module
 from linkedin_mcp_server.linkedin import person as person_module
+from linkedin_mcp_server.linkedin import post_writer as post_writer_module
 from linkedin_mcp_server.linkedin import session as session_module
 from linkedin_mcp_server.linkedin import LinkedInExtractor
 from linkedin_mcp_server.linkedin.fields import COMPANY_SECTIONS, PERSON_SECTIONS
@@ -166,8 +167,9 @@ async def boundaries(
     async def scroll_body(*args: Any, **kwargs: Any) -> None:
         values = bind_effective(real_scroll_body, *args, **kwargs)
         values.pop("page")
-        recorder.record("boundary.scroll_body", **values, actual_scrolls=2)
-        clock.advance(values["pause_time"] * 2)
+        actual_scrolls = min(2, values["max_scrolls"])
+        recorder.record("boundary.scroll_body", **values, actual_scrolls=actual_scrolls)
+        clock.advance(values["pause_time"] * actual_scrolls)
 
     async def scroll_sidebar(*args: Any, **kwargs: Any) -> bool:
         values = bind_effective(real_scroll_sidebar, *args, **kwargs)
@@ -1040,6 +1042,40 @@ async def _get_my_profile_scenario() -> dict[str, Any]:
     )
 
 
+async def _post_preview_scenario(
+    *, unconfirmed_publish: bool = False
+) -> dict[str, Any]:
+    method = "publish_post" if unconfirmed_publish else "prepare_post"
+    recorder = TraceRecorder(f"{method}__preview_only", _COMMON_ALLOWED)
+    clock = FakeClock(recorder)
+    page = _page(recorder, url="https://www.linkedin.com/feed/")
+    page.goto_landings.append("https://www.linkedin.com/in/ada-lovelace/")
+    page.script("evaluate:post_existing_work", {"blocked": False})
+    page.script("evaluate:root_content", _root("Own profile"))
+    _script_profile_target(page, profile_urn="ACoAA-self")
+    extractor = _extractor(page)
+    text = "Synthetic post preview.\n\nSecond paragraph."
+    arguments: dict[str, Any] = {"text": text}
+    with patch.object(
+        post_writer_module.secrets,
+        "token_urlsafe",
+        return_value="synthetic-post-preview",
+    ):
+        async with boundaries(recorder, clock):
+            with recorder.context("prepare_post", "main_profile"):
+                result = await extractor.prepare_post(text)
+            if unconfirmed_publish:
+                arguments = {
+                    "draft_id": result["draft_id"],
+                    "approved_text": text,
+                    "confirmed": False,
+                }
+                with recorder.context("publish_post"):
+                    result = await extractor.publish_post(**arguments)
+    page.assert_clean()
+    return recorder.trace({"method": method, "arguments": arguments}, result)
+
+
 async def _connect_scenario() -> dict[str, Any]:
     name = "connect_with_person__self_profile"
     recorder = TraceRecorder(name, _COMMON_ALLOWED)
@@ -1260,6 +1296,8 @@ async def _facade_contract_trace() -> dict[str, Any]:
 
 
 TOOL_FACADE_METHODS = {
+    "prepare_post",
+    "publish_post",
     "connect_with_person",
     "dismiss_job",
     "extract_feed",
@@ -1365,6 +1403,10 @@ async def build_policy_traces() -> dict[str, dict[str, Any]]:
             "search_companies"
         ),
         "search-posts.json": await _single_capture_facade_scenario("search_posts"),
+        "post-preview.json": await _post_preview_scenario(),
+        "post-publish-unconfirmed.json": await _post_preview_scenario(
+            unconfirmed_publish=True
+        ),
         "inbox.json": await _conversation_scenario("get_inbox"),
         "conversation.json": await _conversation_scenario("get_conversation"),
         "search-conversations.json": await _conversation_scenario(
