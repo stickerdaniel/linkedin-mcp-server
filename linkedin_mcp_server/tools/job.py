@@ -253,6 +253,43 @@ def register_job_tools(
 
     @mcp.tool(
         timeout=tool_timeout,
+        title="Save Job",
+        annotations={
+            "readOnlyHint": False,
+            "destructiveHint": False,
+            "idempotentHint": True,
+            "openWorldHint": True,
+        },
+        tags={"job"},
+    )
+    @tool_errors
+    async def save_job(
+        job_id: str,
+        ctx: Context,
+    ) -> dict[str, Any]:
+        """
+        Save a LinkedIn job posting to the authenticated account's saved jobs list.
+
+        Args:
+            job_id: LinkedIn job ID (e.g., "4252026496", "3856789012")
+            ctx: FastMCP context for progress reporting
+
+        Returns:
+            Dict with url, job_id, saved, and already_saved status.
+        """
+        extractor = await get_ready_extractor(ctx, tool_name="save_job")
+        logger.info("Saving job: %s", job_id)
+
+        await ctx.report_progress(progress=0, total=100, message="Opening job")
+
+        result = await extractor.save_job(job_id)
+
+        await ctx.report_progress(progress=100, total=100, message="Complete")
+
+        return result
+
+    @mcp.tool(
+        timeout=tool_timeout,
         title="Get Saved Jobs",
         annotations={"readOnlyHint": True, "openWorldHint": True},
         tags={"job"},

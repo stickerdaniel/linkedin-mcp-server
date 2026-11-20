@@ -203,6 +203,100 @@ ORGANIC_BEFORE_NOTICE_JS = (
 }"""
 )
 
+# Save state is exposed only through the control's visible text, so the labels
+# are the detection signal, kept in a per-locale table (AGENTS.md, LinkedIn
+# Page Rules). The browser context is forced to en-US (core/browser.py), so that
+# entry is the operative one; other locales are not covered.
+_JOB_SAVE_LABELS_BY_LOCALE: dict[str, dict[str, str]] = {
+    "en-US": {"saved": "Saved", "unsaved": "Save"},
+}
+_JOB_SAVE_LABELS = _JOB_SAVE_LABELS_BY_LOCALE["en-US"]
+
+_JOB_SAVE_CONTROL_WAIT_MS = 10_000
+
+# One scan backs the state read and the click, so both agree on the same unique
+# control. The root is looked up on every call, not cached, so a scan after the
+# posting replaces its `main` follows the replacement.
+_JOB_SAVE_SCAN_JS = r"""
+    const normalize = value => (value || '').replace(/\s+/g, ' ').trim();
+    const matchingControls = (labels) => {
+        const root = document.querySelector('main') || document.body || document;
+        return Array.from(
+            root.querySelectorAll('button, [role="button"]')
+        ).filter(element =>
+            !element.hasAttribute('aria-expanded') &&
+            !element.hasAttribute('disabled') &&
+            labels.includes(normalize(element.innerText || element.textContent))
+        );
+    };
+"""
+
+# `target` narrows the wait: null settles on any single control, "saved" only
+# on a control that has transitioned, so an unchanged unsaved control after a
+# click keeps waiting for its transition instead of being read back at once.
+_JOB_SAVE_STATE_JS = (
+    r"""async ({ labels, waitTimeoutMs = 0, target = null }) => {
+"""
+    + _JOB_SAVE_SCAN_JS
+    + r"""
+    const readState = () => {
+        const controls = matchingControls([labels.saved, labels.unsaved]);
+        if (controls.length === 0) return { kind: 'missing' };
+        if (controls.length !== 1) return { kind: 'ambiguous' };
+        const text = normalize(controls[0].innerText || controls[0].textContent);
+        return { kind: 'state', value: text === labels.saved ? 'saved' : 'unsaved' };
+    };
+    const settled = (state) => target === null
+        ? state.kind === 'state'
+        : state.kind === 'state' && state.value === target;
+
+    const initial = readState();
+    if (settled(initial)) return initial.value;
+    if (initial.kind === 'ambiguous') return null;
+
+    const timeout = Math.max(0, Number(waitTimeoutMs) || 0);
+    if (timeout === 0) return null;
+    return await new Promise(resolve => {
+        let finished = false;
+        let observer;
+        let timer;
+        const finish = state => {
+            if (finished) return;
+            finished = true;
+            observer.disconnect();
+            clearTimeout(timer);
+            resolve(state.kind === 'state' ? state.value : null);
+        };
+        observer = new MutationObserver(() => {
+            const state = readState();
+            if (state.kind === 'ambiguous' || settled(state)) finish(state);
+        });
+        observer.observe(document.documentElement || document, {
+            attributes: true,
+            childList: true,
+            characterData: true,
+            subtree: true,
+        });
+        timer = setTimeout(() => finish(readState()), timeout);
+    });
+}"""
+)
+
+# Revalidate both labels, then click only if the sole control is still unsaved.
+_JOB_SAVE_CLICK_JS = (
+    r"""({ labels }) => {
+"""
+    + _JOB_SAVE_SCAN_JS
+    + r"""
+    const controls = matchingControls([labels.saved, labels.unsaved]);
+    if (controls.length !== 1) return false;
+    const text = normalize(controls[0].innerText || controls[0].textContent);
+    if (text !== labels.unsaved) return false;
+    controls[0].click();
+    return true;
+}"""
+)
+
 # This posting's apply control and state, once they render. Easy Apply comes in
 # two shapes. The anchor into the posting's own `/apply/` route
 # (`<a href=".../jobs/view/<id>/apply/?openSDUIApplyFlow=true">`, measured on
@@ -658,6 +752,64 @@ class JobPageReader:
             landed_url=self._session.page.url,
             scroll_seconds=scroll_seconds,
         )
+
+    async def open_job_posting(self, url: str) -> None:
+        """Navigate to a posting before interacting with its save control."""
+        await self._navigator._navigate_to_page(url)
+        await self._session.check_rate_limit()
+        await self._session.dismiss_modal()
+
+    async def save_control_state(
+        self, *, wait_for_saved: bool = False
+    ) -> Literal["saved", "unsaved"]:
+        """Read the unique save control, waiting for the saved transition when asked.
+
+        The forced en-US labels are the only detection signal. The wait covers
+        a control that renders late; `wait_for_saved` keeps waiting on an
+        unchanged unsaved control instead of reading it back at once. A
+        missing or ambiguous control fails closed.
+        """
+        options: dict[str, object] = {
+            "labels": _JOB_SAVE_LABELS,
+            "waitTimeoutMs": _JOB_SAVE_CONTROL_WAIT_MS,
+        }
+        if wait_for_saved:
+            options["target"] = "saved"
+        state = await self._session.run_on_linkedin(_JOB_SAVE_STATE_JS, options)
+        if state not in {"saved", "unsaved"}:
+            await self._navigator._raise_if_auth_barrier(self._session.page.url)
+            raise LinkedInOperationError(
+                "Could not uniquely identify the LinkedIn job Save control."
+            )
+        return state
+
+    async def click_save_control(self) -> bool:
+        """Click the unique unsaved control, and nothing else.
+
+        Saving is the only action this control is ever clicked for, so the
+        click never targets the Saved label. Uniqueness is revalidated inside
+        the program, so a control count that changed since the state read
+        dispatches nothing.
+        """
+        try:
+            clicked = bool(
+                await self._session.run_on_linkedin(
+                    _JOB_SAVE_CLICK_JS,
+                    {"labels": _JOB_SAVE_LABELS},
+                )
+            )
+        except LinkedInOperationError:
+            # A redirect off LinkedIn, or another operation failure, must reach
+            # the tool envelope. Swallowing it would report a missing button.
+            raise
+        except Exception:
+            logger.debug("Job Save control click failed", exc_info=True)
+            return False
+        if not clicked:
+            # A login wall can replace the posting between the state read and
+            # the click. Report that, not a button that is no longer there.
+            await self._navigator._raise_if_auth_barrier(self._session.page.url)
+        return clicked
 
     async def read_apply_link(
         self, url: str, job_id: str, text: JobApplyTextTable
