@@ -50,6 +50,8 @@
           "host": "127.0.0.1",
           "port": 8000,
           "path": "/mcp",
+          "http_token": null,
+          "allow_unauthenticated_http": false,
           "tool_timeout_seconds": 180.0,
           "daemon_enabled": false
         }
@@ -138,6 +140,8 @@
           "host": "127.0.0.1",
           "port": 8000,
           "path": "/mcp",
+          "http_token": null,
+          "allow_unauthenticated_http": false,
           "tool_timeout_seconds": 90.5,
           "daemon_enabled": true
         }
@@ -267,6 +271,8 @@
           "host": "127.0.0.1",
           "port": 8123,
           "path": "/mcp",
+          "http_token": null,
+          "allow_unauthenticated_http": false,
           "tool_timeout_seconds": 30.0,
           "daemon_enabled": false
         }
@@ -368,6 +374,8 @@
           "host": "localhost",
           "port": 8000,
           "path": "/retained",
+          "http_token": null,
+          "allow_unauthenticated_http": false,
           "tool_timeout_seconds": 180.0,
           "daemon_enabled": false
         }
@@ -450,6 +458,8 @@
           "host": "127.0.0.1",
           "port": 9100,
           "path": "/cli",
+          "http_token": null,
+          "allow_unauthenticated_http": false,
           "tool_timeout_seconds": 180.0,
           "daemon_enabled": false
         }
@@ -526,6 +536,8 @@
           "host": "127.0.0.1",
           "port": 8000,
           "path": "/mcp",
+          "http_token": null,
+          "allow_unauthenticated_http": false,
           "tool_timeout_seconds": 180.0,
           "daemon_enabled": false
         }
@@ -609,6 +621,8 @@
           "host": "127.0.0.1",
           "port": 8000,
           "path": "/mcp",
+          "http_token": null,
+          "allow_unauthenticated_http": false,
           "tool_timeout_seconds": 180.0,
           "daemon_enabled": false
         }
@@ -681,6 +695,8 @@
           "host": "127.0.0.1",
           "port": 8000,
           "path": "/mcp",
+          "http_token": null,
+          "allow_unauthenticated_http": false,
           "tool_timeout_seconds": 180.0,
           "daemon_enabled": false
         }
@@ -756,6 +772,8 @@
           "host": "127.0.0.1",
           "port": 8000,
           "path": "/mcp",
+          "http_token": null,
+          "allow_unauthenticated_http": false,
           "tool_timeout_seconds": 180.0,
           "daemon_enabled": false
         }
@@ -833,6 +851,8 @@
           "host": "127.0.0.1",
           "port": 8000,
           "path": "/mcp",
+          "http_token": null,
+          "allow_unauthenticated_http": false,
           "tool_timeout_seconds": 180.0,
           "daemon_enabled": true
         }
