@@ -26,20 +26,19 @@ host calls again and reads. Where Direct then refuses that read over a login
 browser whose close it never confirmed (its own ``LEFT_OPEN_LINE``), that is
 the baseline's answer and recorded as such, not a problem of the row.
 **Second frontend** (``ROW_SECOND``, daemon only): a second host calls while
-the first frontend's login waits. The owner takes the profile before its
-latch is asked (``sequential_tool_middleware`` ahead of the tool's readiness
-gate), and the login holds the profile until it is done, so the second read
-waits at the owner for up to ``BROWSER_WAIT`` and meets no marker; a marker
-of its own (the latch) is the branch the models cover. The row releases the
-completion once the owner's own progress for that wait reaches the second
-host (``PROFILE_WAIT_PROGRESS``, ``SECOND_WAITING_SECONDS``), which keeps
-the login inside ``LOGIN_TIMEOUT`` and the second read inside
-``BROWSER_WAIT``; without that report the cell is invalid, whatever the
-frontend said. A busy answer to the second read sooner than its
-``BROWSER_WAIT`` after the read was sent, or one whose budget could only
-run out once the login was over, is a finding; any other busy answer leaves
-the order unshown, invalid evidence, since nothing stamps where the owner's
-wait began. Nothing reads on the stale generation, one fresh session is
+the first frontend's login waits. Each login runs in a profile directory of
+its own and holds the shared profile only to publish, so the second read
+meets the owner's marker (its latch) and the second frontend opens a login
+of its own beside the first. That login's wall arrives from a browser the
+origin has not seen (``BROWSER_COOKIE``): a reload or a second tab of the
+first login's browser sends the first one's. The row releases the
+completion to the first login's browser alone once the origin served the
+wall to another browser after the second host's launch
+(``SECOND_LOGIN_SECONDS``); a second frontend that met a marker and whose
+login never opened its wall before the release leaves the cell invalid, and
+one that met no marker is a finding. The first login publishes, the second
+frontend's login ends on that session, and the second frontend runs its read
+again once. Nothing reads on the stale generation, one fresh session is
 issued, and both reads end on it. A release after the login's last ask is
 the row's only when the login's own process says it ran out its
 ``LOGIN_TIMEOUT``; one that says it failed otherwise failed on its own, a
@@ -202,9 +201,7 @@ LOGIN_INLINE_WAIT_SECONDS = 10.0
 LOGIN_SETTLE_SECONDS = 60.0
 #: How long a server waits for a profile another process holds before it
 #: answers that the browser is busy (``BROWSER_WAIT``): the product's own
-#: default, pinned so the record says it, never stretched. The second
-#: frontend's read waits this long at the owner while the login holds the
-#: profile, which it does until about 18 s after its wall (``ROW_SECOND``).
+#: default, pinned so the record says it, never stretched.
 BROWSER_WAIT_SECONDS = DEFAULT_BROWSER_WAIT_SECONDS
 
 #: The cell's environment, over the row's: the same in every column. The
@@ -232,15 +229,13 @@ CLOSE_SECONDS = 60.0
 #: From the cold read to the login's first ask: a cold browser start and its
 #: validation, the owner's answer, and a headed login browser's start.
 LOGIN_START_SECONDS = 120.0
-#: From the second host's start to the owner saying the second read waits
-#: for the profile (``_second_waiting``): a frontend's start, measured at 1
-#: to 4 s, its tool lookup and the call reaching the owner. The login looks
-#: for the session only once its manual wait starts, about 15 s after its
-#: wall, and lets go of the profile about 3 s after it finds one. Released by
-#: this bound's end, about 15 s after the wall, it lets go by about 18.5 s
-#: after the wall: inside ``LOGIN_TIMEOUT``, and inside the second read's
-#: ``BROWSER_WAIT``, which starts with that report, after the wall.
-SECOND_WAITING_SECONDS = 15.0
+#: From the second host's start to its frontend's own login wall
+#: (``second_login_opened``): a frontend's start, measured at 1 to 4 s, its
+#: tool lookup, the owner's marker, and a headed login browser's start in an
+#: empty profile. Released by this bound's end, about 32 s after the first
+#: login's wall, that login finds its session inside its ``LOGIN_TIMEOUT``,
+#: whose manual wait starts about 15 s after its wall.
+SECOND_LOGIN_SECONDS = 30.0
 #: From the release to the session issued, the generation written and the
 #: login browser gone: the product's own 15 s, its export and its close.
 COMPLETION_SECONDS = 90.0
@@ -272,15 +267,6 @@ NOT_REPLAYED_LINES = (
 )
 SIGNED_IN_LINE = "The sign-in finished"
 PEER_LINE = "Another client already signed in"
-#: ``sequential_tool_middleware``: a server's wait for a profile another
-#: process holds ran out, and it answered that the browser is busy.
-PROFILE_WAIT_LINE = "gave up waiting for the shared browser"
-#: ``sequential_tool_middleware``: the progress a server reports for a call
-#: that is about to wait for a profile another process holds, sent right
-#: before that wait starts and relayed by a frontend to the host that called.
-#: It is the owner's own word that the call got past the frontend's tool
-#: lookup and session to the profile, which no line of the frontend's is.
-PROFILE_WAIT_PROGRESS = "waiting for it to hand over"
 #: How the process that ran a login says it ended without a session: a
 #: server's login task (``bootstrap``, once its frontend or Direct server
 #: reads the finished task) and ``--login`` (``setup.run_profile_creation``),
@@ -296,9 +282,9 @@ START_FAILED_LINE = "Failed to start browser"
 #: own was never confirmed, until it is restarted.
 LEFT_OPEN_LINE = "A previous browser on this profile did not shut down cleanly"
 
-#: How the second frontend met the repair, read from its own lines. Its call
-#: waited at the owner for the profile the login held, and it repaired
-#: nothing; or a marker reached it, and it repaired and ran its read again.
+#: How the second frontend met the repair, read from its own lines. A marker
+#: reached it, and it repaired and ran its read again; or none did, and it
+#: repaired nothing, its call waiting at the owner for the profile.
 MET_PROFILE = "profile"
 MET_MARKER = "marker"
 
@@ -349,34 +335,27 @@ def _count(lines: Sequence[str], text: str) -> int:
     return sum(1 for line in lines if text in line)
 
 
-def profile_wait_started(progress: Sequence[Any]) -> int | None:
-    """When the host first heard the owner say its read waits for the
-    profile (``PROFILE_WAIT_PROGRESS``), or ``None``."""
-    for item in progress:
-        heard = _mapping(item)
-        if PROFILE_WAIT_PROGRESS in str(heard.get("message") or ""):
-            return _ns(heard.get("seen_ns"))
+def first_browser(login: Mapping[str, Any]) -> int | None:
+    """The browser the origin first served the login wall to: the first
+    frontend's login, the only one open before the second host starts."""
+    pages = _sequence(login.get("login_pages"))
+    return _mapping(pages[0]).get("browser") if pages else None
+
+
+def second_login_opened(login: Mapping[str, Any], since: int | None) -> int | None:
+    """When the origin first served the login wall to a browser other than
+    the first one, at *since* or later, or ``None``. A login browser starts
+    in an empty profile, so it sends no ``BROWSER_COOKIE``; a reload or a
+    second tab of the first browser sends the first one's."""
+    first = first_browser(login)
+    if first is None or since is None:
+        return None
+    for page in _sequence(login.get("login_pages")):
+        seen = _mapping(page)
+        at = _ns(seen.get("at_ns"))
+        if at is not None and at >= since and seen.get("browser") != first:
+            return at
     return None
-
-
-def _second_waiting(seams: AuthSeams, second: asyncio.Future[Any]) -> bool:
-    """Whether the second host's read waits at the owner for the profile the
-    login holds, and is not over: the owner's own report of that wait reached
-    the second host. Nothing the frontend says can show it, its heartbeats
-    least of all: they start before its fresh tool lookup and session, so
-    they beat on while the call has not reached the owner at all."""
-    return (
-        not second.done() and profile_wait_started(seams.second_progress()) is not None
-    )
-
-
-def _login_over(seams: AuthSeams) -> bool:
-    """Whether the first frontend says its login ended, either way: it waits
-    for the login task, which lets go of the profile before it ends. Seen by
-    a poll, so the time it is seen bounds the profile's release from above
-    only."""
-    flags = _flags(seams.host_output())
-    return bool(flags["signed_in"] or flags["not_replayed"])
 
 
 def marked(lines: Sequence[str]) -> list[dict[str, Any]]:
@@ -492,25 +471,24 @@ async def repair_script(ctx: RowContext) -> None:
                 f"{INVALID}the login never asked for its completion within "
                 f"{LOGIN_START_SECONDS}s of the cold read"
             )
+        browser: int | None = None
         if ctx.row == ROW_SECOND and asked is not None:
-            pending = second = asyncio.ensure_future(seams.second_host())
-            # Released once the owner says the second read waits for the
-            # profile, so the record proves it was there while the login held
-            # it. Released after the bound anyway, so the login still ends
-            # inside its own budget; the verdict then reads the cell invalid
-            # from the second host's own progress, which it keeps.
+            browser = first_browser(seams.login())
+            launched = time.monotonic_ns()
+            second = asyncio.ensure_future(seams.second_host())
+            # Released once the second frontend's own login opened its wall,
+            # so the record shows both logins open at once. Released after the
+            # bound anyway, so the first login still ends inside its own
+            # budget; the verdict then reads the cell from the origin's record.
             await _until(
-                lambda: _second_waiting(seams, pending), SECOND_WAITING_SECONDS
+                lambda: second_login_opened(seams.login(), launched),
+                SECOND_LOGIN_SECONDS,
             )
         if case.release and asked is not None:
-            record["release"] = seams.release()
+            # Only the first login's browser is issued a session: the second
+            # login has to end on the one the first publishes.
+            record["release"] = seams.release(browser=browser)
             _phase(ctx, "released", _ns(record["release"].get("released_ns")))
-        if second is not None:
-            # When the first frontend is seen saying its login ended: the
-            # latest the login can have let go of the profile. It still held
-            # it at its page's last ask, which the origin records.
-            over = await _until(lambda: _login_over(seams), COMPLETION_SECONDS)
-            record["login_over_ns"] = time.monotonic_ns() if over else None
         await asyncio.wait({read}, timeout=READ_SECONDS)
         record["read_open"] = not read.done()
         record["read_ended_login"] = seams.login()
@@ -543,9 +521,6 @@ async def repair_script(ctx: RowContext) -> None:
         if ctx.daemon:
             record["marked"] = marked(seams.owner_log())
             record["marks"] = len(record["marked"])
-            record["profile_waits_ran_out"] = _count(
-                seams.owner_log(), PROFILE_WAIT_LINE
-            )
             record["owner_after"] = await seams.owner_reading("after the repair")
     finally:
         await _settle_tasks([read, second])
@@ -1072,93 +1047,47 @@ def second_met(record: Mapping[str, Any]) -> str:
     return MET_MARKER if any(lines.get(end) for end in ends) else MET_PROFILE
 
 
-def second_failure(record: Mapping[str, Any], call: Mapping[str, Any]) -> str:
-    """Why the second host's read did not end on the fresh session.
-
-    Where the owner's log says a wait for the profile ran out
-    (``profile_waits_ran_out``), the host's call bounds that wait from
-    outside only: it began no sooner than the call was sent and ended no
-    later than the answer reached the host. The owner gives up only once its
-    whole ``BROWSER_WAIT`` has passed on the same monotonic clock, right
-    after a last failed try for the profile. So an answer sooner than that
-    budget after the call was sent is the owner refusing early, and a budget
-    that could only run out after the first frontend said its login was
-    over (``login_over_ns``, when the profile was free) is the owner refusing
-    early or passing over a free profile: findings both.
-
-    Nothing shows the owner waited its whole budget while the login held the
-    profile: its log stamps no start of that wait, and the host hears the
-    owner's report of the start and its answer each a frontend hop late, by
-    however long the frontend is held up: 2.2 s either way in a probe. Any
-    other busy answer is that order
-    unshown, invalid evidence, never the release's miss. Without the
-    owner's word that a wait ran out, the failed read stands as one."""
-    failed = (
-        f"the second host's read did not end on the new generation: outcome "
-        f"{call.get('outcome')!r}, error {call.get('is_error')!r}"
-    )
-    ran_out = record.get("profile_waits_ran_out")
-    began = _ns(call.get("began_monotonic_ns"))
-    ended = _ns(call.get("ended_monotonic_ns"))
-    if not isinstance(ran_out, int) or ran_out < 1 or began is None or ended is None:
-        return failed
-    spent = (ended - began) / 1e9
-    if spent < BROWSER_WAIT_SECONDS:
-        return (
-            f"the owner answered the second read busy {spent:.1f}s after it was "
-            f"sent, before its BROWSER_WAIT of {BROWSER_WAIT_SECONDS:g}s could "
-            f"run out"
-        )
-    over = _ns(record.get("login_over_ns"))
-    budget_out = began + int(BROWSER_WAIT_SECONDS * 1e9)
-    if over is not None and budget_out > over:
-        return (
-            f"the owner answered the second read busy although the first "
-            f"frontend's login was over {(budget_out - over) / 1e9:.1f}s before "
-            f"its BROWSER_WAIT of {BROWSER_WAIT_SECONDS:g}s could run out: it "
-            f"gave up early or passed over the free profile"
-        )
-    return (
-        f"{INVALID}the owner answered the second read busy {spent:.1f}s after it "
-        f"was sent, and whether it waited its whole BROWSER_WAIT of "
-        f"{BROWSER_WAIT_SECONDS:g}s while the login held the profile is not "
-        f"shown: nothing stamps where its wait began"
-    )
-
-
 def _second(record: Mapping[str, Any]) -> list[str]:
-    """The owner said the second host's read waited for the profile before
-    the release, and the read ended on the fresh session; a frontend a
-    marker reached ran it again once."""
+    """A marker reached the second frontend, its own login opened its wall
+    beside the first before the release, which named the first login's
+    browser alone, and its read ran again once and ended on the fresh
+    session."""
     second = _mapping(record.get("second"))
     found: list[str] = []
-    released = _ns(_login(record).get("released_ns"))
+    login = _login(record)
+    released = _ns(login.get("released_ns"))
     if not second.get("made"):
         return [f"{INVALID}the second host never ran: {second.get('why')!r}"]
     call = _mapping(second.get("call"))
-    began = _ns(call.get("began_monotonic_ns"))
-    waiting = profile_wait_started(_sequence(second.get("progress")))
-    if (
-        waiting is None
-        or released is None
-        or began is None
-        or waiting < began
-        or waiting > released
-    ):
+    lines = _mapping(second.get("lines"))
+    if login.get("released_browser") != first_browser(login):
         found.append(
-            f"{INVALID}the owner did not say the second host's read waited for "
-            f"the profile before the release"
+            f"{INVALID}the release did not name the first login's browser alone"
         )
+    if second_met(record) != MET_MARKER:
+        found.append(
+            "no marker reached the second frontend: its read waited at the owner "
+            "instead of signing in beside the first login"
+        )
+    else:
+        opened = second_login_opened(login, _ns(second.get("launched_ns")))
+        if opened is None or released is None or opened > released:
+            found.append(
+                f"{INVALID}the second frontend's login did not open its wall "
+                f"before the release"
+            )
+        if lines.get("replayed") != 1:
+            found.append(
+                f"the second frontend repaired on a marker but did not run its "
+                f"read again exactly once: {lines.get('replayed')!r}"
+            )
     if second.get("forwarded") is not True:
         found.append("the second host's call was not forwarded to the owner")
-    lines = _mapping(second.get("lines"))
-    if second_met(record) == MET_MARKER and lines.get("replayed") != 1:
-        found.append(
-            f"the second frontend repaired on a marker but did not run its read "
-            f"again exactly once: {lines.get('replayed')!r}"
-        )
     if not _read_the_post(call):
-        found.append(second_failure(record, call))
+        found.append(
+            f"the second host's read did not end on the new generation: outcome "
+            f"{call.get('outcome')!r}, error {call.get('is_error')!r}"
+        )
     elif (_ns(call.get("ended_monotonic_ns")) or 0) < (released or 0):
         found.append(f"{INVALID}the second host's read ended before the release")
     if second.get("quit_problems"):

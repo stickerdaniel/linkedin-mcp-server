@@ -1,6 +1,7 @@
 """Authentication functions for LinkedIn."""
 
 import asyncio
+from collections.abc import Callable
 import logging
 import re
 from urllib.parse import urlparse
@@ -394,17 +395,28 @@ async def _has_auth_cookie(page: Page) -> bool:
     )
 
 
-async def wait_for_manual_login(page: Page, timeout: int = 300000) -> None:
+class PeerSignedInError(Exception):
+    """Another login published a session while this one was still waiting."""
+
+
+async def wait_for_manual_login(
+    page: Page,
+    timeout: int = 300000,
+    *,
+    stop_when: Callable[[], bool] | None = None,
+) -> None:
     """Wait for user to manually complete login.
 
     Args:
         page: Patchright page object
         timeout: Timeout in milliseconds. ``0`` waits with no time limit.
+        stop_when: Asked once per poll; true ends the wait.
 
     Raises:
         AuthenticationError: If the timeout elapses before login completes.
         AccountRestrictedError: If any tab lands on LinkedIn's
             account-restriction route.
+        PeerSignedInError: *stop_when* answered true.
     """
     minutes = timeout / 60000
     if timeout:
@@ -453,11 +465,12 @@ async def wait_for_manual_login(page: Page, timeout: int = 300000) -> None:
 
     while True:
         _check_wait_budget(log_status=False)
-        # interactive_login rotates the old profile before opening this context,
-        # so any li_at here was issued after the current login's challenges
-        # cleared. The cookie belongs to the context rather than a tab and survives
-        # the tab
-        # that completed sign-in being closed.
+        if stop_when is not None and stop_when():
+            raise PeerSignedInError
+        # interactive_login opens this context on a fresh empty directory, so
+        # any li_at here was issued after the current login's challenges
+        # cleared. The cookie belongs to the context rather than a tab and
+        # survives the tab that completed sign-in being closed.
         try:
             remaining = _remaining_wait_seconds()
             if remaining is None:

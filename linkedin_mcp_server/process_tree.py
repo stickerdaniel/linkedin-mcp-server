@@ -55,8 +55,7 @@ class _PosixGroupRegistration:
 
 _registered_posix_groups: dict[int, _PosixGroupRegistration] = {}
 _registered_browser_markers: set[str] = set()
-_browser_guardian_process: subprocess.Popen[Any] | None = None
-_browser_guardian_control_fd: int | None = None
+_live_browser_guardians: list[BrowserGuardian] = []
 _live_windows_jobs: list[WindowsJob] = []
 _JOB_API_FAILURE_LIMIT = 3
 _JOB_POLL_SECONDS = 0.01
@@ -90,16 +89,67 @@ class ProcessTreeError(RuntimeError):
     """The operating system could not establish descendant containment."""
 
 
-def start_browser_guardian(lease_fd: int) -> None:
-    """Start a detached POSIX process that retains the profile lease on crashes."""
-    global _browser_guardian_control_fd, _browser_guardian_process
-    if _IS_WINDOWS:
-        return
-    if _browser_guardian_process is not None:
-        if _browser_guardian_process.poll() is None:
+class BrowserGuardian:
+    """One crash guardian holding one lock until its browser groups are gone.
+
+    One instance per protected lock: the serving browser's source lease and
+    each pending login's attempt lock live side by side in one process, and a
+    guardian shared between them would hold only the descriptor it started
+    with while either close released it for both. Every marker minted while an
+    instance is live is sent to it, so a crash drains every browser this
+    process started before any of its locks comes free.
+    """
+
+    def __init__(
+        self, process: subprocess.Popen[Any] | None, control_fd: int | None
+    ) -> None:
+        self._process = process
+        self._control_fd = control_fd
+
+    def _send(self, line: bytes) -> None:
+        process = self._process
+        control_fd = self._control_fd
+        if process is None or control_fd is None:
             return
-        _browser_guardian_process = None
-        _browser_guardian_control_fd = None
+        if process.poll() is not None:
+            raise ProcessTreeError("The browser crash guardian exited unexpectedly")
+        try:
+            os.write(control_fd, line)
+        except OSError as exc:
+            raise ProcessTreeError(
+                "The browser crash guardian could not retain its marker"
+            ) from exc
+
+    @property
+    def pid(self) -> int | None:
+        return None if self._process is None else self._process.pid
+
+    def release(self) -> None:
+        """Let the lock go; only after Chromium is confirmed gone."""
+        with contextlib.suppress(ValueError):
+            _live_browser_guardians.remove(self)
+        process, self._process = self._process, None
+        control_fd, self._control_fd = self._control_fd, None
+        if control_fd is not None:
+            with contextlib.suppress(OSError):
+                os.write(control_fd, b"release\n")
+            with contextlib.suppress(OSError):
+                os.close(control_fd)
+        if process is None:
+            return
+        try:
+            process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            with contextlib.suppress(OSError):
+                process.kill()
+            with contextlib.suppress(OSError, subprocess.SubprocessError):
+                process.wait(timeout=5)
+
+
+def start_browser_guardian(lease_fd: int) -> BrowserGuardian:
+    """Start a detached POSIX process that retains *lease_fd* on crashes."""
+    if _IS_WINDOWS:
+        return BrowserGuardian(None, None)
 
     control_read, control_write = os.pipe()
     ready_read, ready_write = os.pipe()
@@ -164,46 +214,14 @@ def start_browser_guardian(lease_fd: int) -> None:
                 with contextlib.suppress(OSError):
                     os.close(descriptor)
 
-    _browser_guardian_process = process
-    _browser_guardian_control_fd = control_write
-
-
-def release_browser_guardian() -> None:
-    """Release the crash guardian after Chromium is confirmed gone."""
-    global _browser_guardian_control_fd, _browser_guardian_process
-    process = _browser_guardian_process
-    control_fd = _browser_guardian_control_fd
-    _browser_guardian_process = None
-    _browser_guardian_control_fd = None
-    if control_fd is not None:
-        with contextlib.suppress(OSError):
-            os.write(control_fd, b"release\n")
-        with contextlib.suppress(OSError):
-            os.close(control_fd)
-    if process is None:
-        return
-    try:
-        process.wait(timeout=5)
-    except subprocess.TimeoutExpired:
-        with contextlib.suppress(OSError):
-            process.kill()
-        with contextlib.suppress(OSError, subprocess.SubprocessError):
-            process.wait(timeout=5)
+    started = BrowserGuardian(process, control_write)
+    _live_browser_guardians.append(started)
+    return started
 
 
 def _send_marker_to_guardian(marker: str) -> None:
-    process = _browser_guardian_process
-    control_fd = _browser_guardian_control_fd
-    if process is None or control_fd is None:
-        return
-    if process.poll() is not None:
-        raise ProcessTreeError("The browser crash guardian exited unexpectedly")
-    try:
-        os.write(control_fd, f"marker {marker}\n".encode("ascii"))
-    except OSError as exc:
-        raise ProcessTreeError(
-            "The browser crash guardian could not retain its marker"
-        ) from exc
+    for guardian in tuple(_live_browser_guardians):
+        guardian._send(f"marker {marker}\n".encode("ascii"))
 
 
 def new_browser_process_marker() -> tuple[str, dict[str, str]]:
@@ -465,12 +483,14 @@ def remember_detached_process_groups(marker: str | None = None) -> None:
         rows = {}
 
     observed = list(_posix_detached_descendants(pid, process_group))
-    guardian = _browser_guardian_process
-    if guardian is not None:
+    guardians = {
+        pid for guardian in _live_browser_guardians if (pid := guardian.pid) is not None
+    }
+    if guardians:
         observed = [
             item
             for item in observed
-            if item[0] != guardian.pid and item[1] != guardian.pid
+            if item[0] not in guardians and item[1] not in guardians
         ]
     marked: set[int] = set()
     if marker is not None:

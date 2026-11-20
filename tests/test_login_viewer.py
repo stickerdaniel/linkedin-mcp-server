@@ -13,6 +13,7 @@ from typing import Any, cast
 import pytest
 
 import linkedin_mcp_server.login_viewer as viewer_module
+from linkedin_mcp_server.login_attempt import PendingLogin
 from linkedin_mcp_server.login_viewer import (
     LoginViewer,
     LoginViewerError,
@@ -20,6 +21,17 @@ from linkedin_mcp_server.login_viewer import (
     require_persistent_profile_mount,
     viewer_url,
 )
+
+
+def _pending(tmp_path: Path) -> PendingLogin:
+    """The attempt a login runs in, as far as its browser half reads it."""
+    attempt = tmp_path / "attempt"
+    return cast(
+        PendingLogin,
+        SimpleNamespace(
+            profile_dir=attempt / "profile", cookie_path=attempt / "cookies.json"
+        ),
+    )
 
 
 def test_viewer_url_carries_the_token_only_in_the_fragment() -> None:
@@ -393,7 +405,7 @@ async def test_login_prompt_reports_the_effective_viewer_budget(
     monkeypatch.setattr(setup, "_run_login", login_succeeds)
 
     assert await setup._login_into_fresh_profile(
-        tmp_path / "profile",
+        _pending(tmp_path),
         config=config,
         state=setup._LoginState(),
         login_viewer=login_viewer,
@@ -444,7 +456,7 @@ async def test_a_viewer_that_never_starts_leaves_the_profile_free(
     state = setup._LoginState()
     with pytest.raises(RuntimeError, match="openbox"):
         await setup._login_into_fresh_profile(
-            tmp_path / "profile",
+            _pending(tmp_path),
             config=config,
             state=state,
             login_viewer=True,
@@ -542,8 +554,7 @@ async def test_remote_teardown_precedes_chromium_and_preserves_failure(
     with pytest.raises(ValueError, match="navigation failed"):
         await setup._run_login(
             cast(setup.BrowserManager, Manager()),
-            tmp_path / "profile",
-            SimpleNamespace(),
+            tmp_path / "cookies.json",
             0,
             viewer=cast(LoginViewer, Viewer()),
         )
@@ -594,7 +605,7 @@ async def test_window_manager_teardown_does_not_mask_cookie_export_failure(
     state = setup._LoginState()
 
     result = await setup._login_into_fresh_profile(
-        tmp_path / "profile", config=config, state=state, login_viewer=True
+        _pending(tmp_path), config=config, state=state, login_viewer=True
     )
 
     assert result is False

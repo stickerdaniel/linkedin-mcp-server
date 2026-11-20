@@ -36,6 +36,7 @@ logger = logging.getLogger(__name__)
 _SOURCE_STATE_FILE = "source-state.json"
 _RUNTIME_STATE_FILE = "runtime-state.json"
 _RUNTIME_PROFILES_DIR = "runtime-profiles"
+_LOGOUT_EPOCH_FILE = "logout-epoch"
 
 # Prefix of the timestamped directories retired auth state is moved into.
 QUARANTINE_PREFIX = "invalid-state-"
@@ -111,6 +112,19 @@ def portable_cookie_path(source_profile_dir: Path | None = None) -> Path:
 def source_state_path(source_profile_dir: Path | None = None) -> Path:
     """Return the source session metadata path."""
     return auth_root_dir(source_profile_dir) / _SOURCE_STATE_FILE
+
+
+def logout_epoch_path(source_profile_dir: Path | None = None) -> Path:
+    """Return the path of the marker every logout replaces."""
+    return auth_root_dir(source_profile_dir) / _LOGOUT_EPOCH_FILE
+
+
+def read_logout_epoch(source_profile_dir: Path | None = None) -> str:
+    """The current logout epoch, or ``""`` before the first logout."""
+    try:
+        return logout_epoch_path(source_profile_dir).read_text().strip()
+    except FileNotFoundError:
+        return ""
 
 
 def runtime_profiles_root(source_profile_dir: Path | None = None) -> Path:
@@ -1300,6 +1314,56 @@ def auth_state_identity(source_profile_dir: Path | None = None) -> AuthStateIden
     )
 
 
+def _source_session_present(profile_dir: Path) -> bool:
+    return (
+        profile_exists(profile_dir)
+        or portable_cookie_path(profile_dir).exists()
+        or source_state_path(profile_dir).exists()
+    )
+
+
+def _write_logout_epoch(profile_dir: Path) -> None:
+    secure_write_text(logout_epoch_path(profile_dir), f"{uuid4()}\n")
+
+
+def advance_logout_epoch(
+    source_profile_dir: Path | None = None,
+    *,
+    expect_empty: bool = False,
+    wait_seconds: float = 0.0,
+) -> bool:
+    """Record a logout, so a login that was open across it cannot publish.
+
+    A pending login reads the epoch when it starts and promotes only while the
+    epoch is unchanged, both under the profile lease this takes. With
+    *expect_empty* the epoch advances only if the source still holds no
+    session once the lease is held: a session that appeared after the caller
+    looked was never shown to the user, so it is neither cleared nor fenced.
+
+    Returns whether the epoch advanced.
+
+    Raises:
+        ProfileRootRefusedError: The root is not one this server owns.
+        RuntimeError: Another process held the profile past *wait_seconds*.
+    """
+    from linkedin_mcp_server.profile_lease import get_profile_lease
+
+    profile_dir = _owned(source_profile_dir)
+    lease = get_profile_lease(profile_dir)
+    if not _take_within(lease, wait_seconds):
+        raise RuntimeError(
+            "The browser profile is in use by another process. Stop the "
+            "running server or container before clearing the stored session."
+        )
+    try:
+        if expect_empty and _source_session_present(profile_dir):
+            return False
+        _write_logout_epoch(profile_dir)
+        return True
+    finally:
+        lease.release()
+
+
 def clear_auth_state(
     source_profile_dir: Path | None = None,
     *,
@@ -1368,6 +1432,7 @@ def clear_auth_state(
             except OSError as exc:
                 logger.warning("Could not clear auth artifact %s: %s", target, exc)
                 success = False
+        _write_logout_epoch(profile_dir)
         return success
 
 

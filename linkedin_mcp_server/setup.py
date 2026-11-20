@@ -2,7 +2,8 @@
 Interactive setup flows for LinkedIn MCP Server authentication.
 
 Handles session creation through interactive browser login using Patchright
-with persistent context. Profile state auto-persists to user_data_dir.
+with persistent context. Each login runs in its own attempt directory and its
+session becomes the source profile once the browser has closed.
 """
 
 import asyncio
@@ -23,24 +24,22 @@ from linkedin_mcp_server.core import (
     resolve_remember_me_prompt,
     wait_for_manual_login,
 )
+from linkedin_mcp_server.core.auth import PeerSignedInError
 from linkedin_mcp_server.exceptions import BrowserBusyError
+from linkedin_mcp_server.login_attempt import PendingLogin, open_pending_login, promote
 from linkedin_mcp_server.login_viewer import LoginViewer, VIEWER_WALL_SECONDS
-from linkedin_mcp_server.process_tree import (
-    release_browser_guardian,
-    start_browser_guardian,
-)
-from linkedin_mcp_server.profile_lease import ProfileLease, get_profile_lease
+from linkedin_mcp_server.profile_lease import get_profile_lease
 from linkedin_mcp_server.session_state import (
     UNGUARDED,
     a_peer_already_signed_in,
+    load_source_state,
     run_deferring_cancels,
-    portable_cookie_path,
-    restore_source_profile,
-    rotate_shielded,
-    write_source_state,
 )
 
 from linkedin_mcp_server.drivers.browser import close_browser, get_profile_dir
+
+_PEER_SIGNED_IN = "   Another client already signed in; using its session."
+_SIGNED_OUT_MEANWHILE = "   Signed out while this login was open; sign in again."
 
 
 async def interactive_login(
@@ -50,20 +49,21 @@ async def interactive_login(
     login_viewer: bool = False,
 ) -> bool:
     """
-    Open browser for manual LinkedIn login with persistent profile.
+    Open browser for manual LinkedIn login in a fresh attempt directory.
 
     Opens a non-headless browser, navigates to LinkedIn login page,
     and waits for user to complete authentication (including 2FA, captcha, etc.).
-    Profile state auto-persists to user_data_dir.
+    No profile lease is held meanwhile: the session is installed at
+    *user_data_dir* under a short lease once the browser has closed.
 
     Args:
         user_data_dir: Path to browser profile. Defaults to config's user_data_dir.
         superseded_by: The login generation the caller believes is broken, or
             ``None`` when it observed no session at all. Either way the login
-            stands down if a *different* usable session is on disk by the time it
-            holds the profile, because somebody else has already done the work.
-            Left at :data:`UNGUARDED` by callers with nothing to compare against,
-            such as ``--login`` typed at a terminal.
+            stands down once a *different* usable session is on disk, because
+            somebody else has already done the work. Left at
+            :data:`UNGUARDED` by callers with nothing to compare against, such
+            as ``--login`` typed at a terminal, which replaces what it finds.
 
     Returns:
         True if login was successful, or a peer's session is already in place
@@ -74,185 +74,127 @@ async def interactive_login(
     if user_data_dir is None:
         user_data_dir = get_profile_dir()
 
-    # A manual login means a new session, possibly for a different account, so
-    # the previous profile must not be reused: Chromium would keep its existing
-    # machine_id and friends and hand LinkedIn the same device identity twice.
     # Closing first so a later teardown cannot export the retired session's
     # cookies over the new ones (drivers.browser exports on close).
     await close_browser()
 
-    # The login browser owns the profile for its whole run, which can be the
-    # full 30-minute login timeout. Without this the profile looks free the
-    # moment cookies are written, and another process could launch against it
-    # while this browser is still open.
-    lease = get_profile_lease(user_data_dir)
-    # Waited for rather than demanded outright, because this is also the path a
-    # frontend takes when the shared browser asks it to sign in. A proxy holds no
-    # lease of its own to reuse, so a momentary holder anywhere else would leave
-    # the user with a login that refuses to open and no way to make it.
-    #
-    # Bounded by how long someone who just asked to sign in should be left
-    # waiting, rather than by any worst case: a holder part way through a tool
-    # call will not hand over until it finishes, and that can run to the tool
-    # timeout. Past this the user is told the browser is busy, which they can act
-    # on, and which beats a silent wait of several minutes.
-    if not await lease.acquire(timeout=PROFILE_HANDOVER_WAIT_SECONDS):
-        raise BrowserBusyError(
-            "Another LinkedIn MCP client is using the browser, so a login "
-            "cannot start. Close it and try again."
-        )
-    # Every exit runs through one finally: a login can fail before the browser
-    # opens (rotation errors, cancellation) or after it closed cleanly but with
-    # an exception, and each of those must still settle the profile correctly.
+    guarded = superseded_by is not UNGUARDED
+
+    def a_peer_published() -> bool:
+        return guarded and a_peer_already_signed_in(user_data_dir, superseded_by)
+
+    if a_peer_published():
+        print(_PEER_SIGNED_IN)
+        return True
+
+    pending = open_pending_login(user_data_dir)
     state = _LoginState()
     try:
-        # Checked here and nowhere earlier, because here is the first moment it
-        # can be trusted: the profile is held, so nothing can change underneath
-        # the answer. An earlier check, before the wait, is exactly what does not
-        # work. Two clients meeting one dead session both look, both see it dead,
-        # and both queue for the profile; the one that waited then holds a stale
-        # opinion. It would rotate the session the winner has just created, which
-        # was measured: the fresh generation ended up in quarantine and
-        # `load_source_state` returned None.
-        #
-        # Inside the try, so a failure while asking still releases the profile.
-        # Outside it, an unreadable profile directory left the lease held until
-        # the process exited, which locks out every other client.
+        try:
+            signed_in = await _login_into_fresh_profile(
+                pending,
+                config=get_config(),
+                state=state,
+                stop_when=a_peer_published if guarded else None,
+                login_viewer=login_viewer,
+            )
+        except PeerSignedInError:
+            print(_PEER_SIGNED_IN)
+            return True
+        if not state.close_confirmed:
+            print("   The login browser did not close; sign in again.")
+            return False
+        if not signed_in:
+            return False
+        # A loser that got its cookie after a peer published goes no further:
+        # waiting for the lease would only find the peer's session there.
+        if a_peer_published():
+            print(_PEER_SIGNED_IN)
+            return True
+        return await _publish(pending, user_data_dir, superseded_by=superseded_by)
+    finally:
+        if state.close_confirmed:
+            pending.discard()
+        else:
+            # The attempt's lock stays held, by this process and its guardian,
+            # so no sweep deletes the directory under a Chromium that may
+            # still be running. Freed when this process exits.
+            print(
+                "   Warning: the login browser did not shut down cleanly. "
+                f"Its directory is kept at {pending.directory}."
+            )
+
+
+async def _publish(
+    pending: PendingLogin,
+    user_data_dir: Path,
+    *,
+    superseded_by: str | None | object,
+) -> bool:
+    """Install the attempt's session under the source lease."""
+    # Again, because a tool call may have reopened it on the old session while
+    # the login ran, and its close would export those cookies over the new ones.
+    await close_browser()
+    lease = get_profile_lease(user_data_dir)
+    if not await lease.acquire(timeout=PROFILE_HANDOVER_WAIT_SECONDS):
         if superseded_by is not UNGUARDED and a_peer_already_signed_in(
             user_data_dir, superseded_by
         ):
-            print("   Another client already signed in; using its session.")
+            print(_PEER_SIGNED_IN)
             return True
-
-        login_kwargs = {"login_viewer": True} if login_viewer else {}
-        return await _login_holding_the_profile(
-            user_data_dir, lease, state, **login_kwargs
+        raise BrowserBusyError(
+            "Another LinkedIn MCP client is using the browser, so the new "
+            "session could not be saved. Close it and sign in again."
+        )
+    try:
+        # Deferred rather than abandoned: the worker is already moving the
+        # session, and dropping its result mid move would split it.
+        outcome, cancelled = await run_deferring_cancels(
+            functools.partial(promote, pending, superseded_by=superseded_by)
         )
     finally:
-        if state.close_confirmed:
-            # Only clear liveness this login actually set. A pre-launch failure
-            # can happen because a *previous* unconfirmed browser still holds
-            # the profile, and clearing that flag here would erase the warning
-            # someone else raised.
-            if state.browser_opened:
-                lease.mark_browser_closed()
-            lease.release()
-        else:
-            # Keep the kernel lock as well as the process-local flag: other
-            # processes cannot see the flag and would launch on top of a
-            # Chromium that may still be running. Freed when this process exits.
-            print(
-                "   Warning: the login browser did not shut down cleanly. "
-                "Restart the server before using this profile again."
-            )
+        lease.release()
+    if cancelled:
+        raise asyncio.CancelledError
+    if outcome == "peer":
+        print(_PEER_SIGNED_IN)
+        return True
+    if outcome == "fenced":
+        print(_SIGNED_OUT_MEANWHILE)
+        return False
+    source_state = load_source_state(user_data_dir)
+    if source_state is not None:
+        print(f"   Source session generation: {source_state.login_generation}")
+    print(f"Profile saved to {user_data_dir}")
+    return True
 
 
 @dataclass
 class _LoginState:
-    """Whether the login browser was opened, and whether it closed cleanly.
+    """Whether the login browser closed cleanly.
 
-    Carried by reference so the caller can settle the profile on every exit
+    Carried by reference so the caller can settle the attempt on every exit
     path, including the ones where no value is ever returned.
     """
 
-    browser_opened: bool = False
-    # Only a proven teardown clears the profile, so an exception or cancellation
-    # that never reaches the assignment leaves it held rather than claiming a
-    # shutdown nobody observed.
-    close_confirmed: bool = True
-
-
-async def _login_holding_the_profile(
-    user_data_dir: Path,
-    lease: ProfileLease,
-    state: _LoginState,
-    *,
-    login_viewer: bool = False,
-) -> bool:
-    """Rotate and log in; the caller owns the profile for the whole flow."""
-    # Rotation must happen before the browser is marked open: the exclusivity
-    # check treats an open browser as a reason to refuse, so marking first would
-    # make every re-login fail to retire the profile it is replacing.
-    retired = await rotate_shielded(user_data_dir)
-
-    # The lease lives in this process, so a crash between here and the browser's
-    # exit frees the profile while Chromium is still on it. The guardian holds a
-    # second reference and lets go once every marked group is gone. Started on
-    # this path as well because the login builds its own manager below instead of
-    # going through the shared launch, which is where the only other start sits.
-    start_browser_guardian(lease.guardian_fd())
-
-    succeeded = False
-    # The lease reference alone stops other processes; this additionally stops
-    # rotation and logout inside *this* one, which the reference cannot express.
-    lease.mark_browser_open()
-    state.browser_opened = True
-    state.close_confirmed = False
-    try:
-        login_kwargs = {"login_viewer": True} if login_viewer else {}
-        succeeded = await _login_into_fresh_profile(
-            user_data_dir,
-            config=get_config(),
-            state=state,
-            **login_kwargs,
-        )
-        return succeeded
-    finally:
-        # The retirement happens before the replacement exists, so a login that
-        # is cancelled, times out, or fails to export its cookies would
-        # otherwise leave the user logged out of a session that was working.
-        #
-        # Not on an unconfirmed close: the login browser may still be running,
-        # so moving the old session back underneath it would corrupt both. The
-        # backup stays in quarantine, which is recoverable; writing over a live
-        # profile is not. Restore would also raise from this finally and mask
-        # whatever actually failed.
-        if state.close_confirmed:
-            # Only a proved teardown lets the guardian go, and letting it go is
-            # not optional: it is started once per process, so a guardian left
-            # behind here holds a descriptor this login has already unlocked and
-            # every later launch reuses it instead of starting one that holds
-            # anything.
-            release_browser_guardian()
-            # Cleared before restore, which now takes the profile exclusively
-            # and would otherwise refuse against our own liveness flag. The
-            # lease reference is still held, so no other process can slip in.
-            lease.mark_browser_closed()
-        if retired is not None and not succeeded:
-            if not state.close_confirmed:
-                print(
-                    f"   The previous session was not restored because the "
-                    f"login browser did not shut down cleanly. It is kept at "
-                    f"{retired}."
-                )
-            else:
-                # Cancellation is deferred rather than abandoning the worker: it
-                # is already moving the session back, and dropping its result
-                # mid move would leave the user logged out with the pieces
-                # split. It is re-raised afterwards so the caller still sees it.
-                restored, cancelled = await run_deferring_cancels(
-                    functools.partial(restore_source_profile, retired, user_data_dir)
-                )
-                if not restored:
-                    print(
-                        f"   Warning: the previous session could not be restored. "
-                        f"It is kept at {retired}."
-                    )
-                if cancelled:
-                    raise asyncio.CancelledError
+    # Only a proven teardown deletes the attempt, so an exception or
+    # cancellation that never reaches the assignment leaves it held rather
+    # than claiming a shutdown nobody observed.
+    close_confirmed: bool = False
 
 
 async def _login_into_fresh_profile(
-    user_data_dir: Path,
+    pending: PendingLogin,
     *,
     config: Any,
     state: _LoginState,
+    stop_when: Callable[[], bool] | None = None,
     login_viewer: bool = False,
 ) -> bool:
-    """Drive the manual login against a freshly retired profile directory.
+    """Drive the manual login in the attempt's empty profile directory.
 
     Records on *state* whether the login browser's shutdown was confirmed. The
-    caller must not release the profile when it was not: Chromium may still be
+    caller must not delete the attempt when it was not: Chromium may still be
     holding it.
     """
     login_timeout_seconds = config.browser.login_timeout_seconds
@@ -281,7 +223,7 @@ async def _login_into_fresh_profile(
     describe_launch(launch_options)
 
     manager = BrowserManager(
-        user_data_dir=user_data_dir,
+        user_data_dir=pending.profile_dir,
         headless=False,
         slow_mo=config.browser.slow_mo,
         viewport=viewport,
@@ -294,11 +236,15 @@ async def _login_into_fresh_profile(
         if viewer is not None:
             viewer.start_window_manager()
         # ``_run_login`` opens the manager on its first line, so from here on
-        # the manager's verdict is an answer about this profile. Before here it
+        # the manager's verdict is an answer about this attempt. Before here it
         # is only its pessimistic default, which is not the same thing.
         handed_over = True
         result = await _run_login(
-            manager, user_data_dir, config, login_timeout_ms, viewer=viewer
+            manager,
+            pending.cookie_path,
+            login_timeout_ms,
+            stop_when=stop_when,
+            viewer=viewer,
         )
         if not result:
             failure = RuntimeError("login did not produce a portable session")
@@ -308,13 +254,9 @@ async def _login_into_fresh_profile(
         raise
     finally:
         # In a finally so a login that times out or is cancelled still records a
-        # teardown that did complete; otherwise an ordinary timeout would leave
-        # the profile held for the rest of this process's life. Defaults to
-        # confirmed for a manager that does not report it, so a stand-in cannot
-        # wedge the profile, and for one never opened, which cannot be holding
-        # anything: a window manager that fails to come up ends the login
-        # before any browser exists, and reading the default off that manager
-        # would keep the profile over a Chromium that never ran.
+        # teardown that did complete. Defaults to confirmed for a manager that
+        # does not report it, so a stand-in cannot wedge the attempt, and for
+        # one never opened, which cannot be holding anything.
         state.close_confirmed = (
             bool(getattr(manager, "close_confirmed", True)) if handed_over else True
         )
@@ -329,10 +271,10 @@ async def _login_into_fresh_profile(
 
 async def _run_login(
     manager: BrowserManager,
-    user_data_dir: Path,
-    config: Any,
+    cookie_path: Path,
     login_timeout_ms: int,
     *,
+    stop_when: Callable[[], bool] | None = None,
     viewer: LoginViewer | None = None,
 ) -> bool:
     async with manager as browser:
@@ -357,7 +299,9 @@ async def _run_login(
 
             # Wait for manual login completion. The budget comes from
             # LOGIN_TIMEOUT (config.browser.login_timeout_seconds); 0 = unlimited.
-            await wait_for_manual_login(browser.page, timeout=login_timeout_ms)
+            await wait_for_manual_login(
+                browser.page, timeout=login_timeout_ms, stop_when=stop_when
+            )
 
             # Wait for persistent context to flush cookies to disk
             await asyncio.sleep(2)
@@ -373,18 +317,14 @@ async def _run_login(
                 await asyncio.sleep(5)
 
             # Export source-session cookies for the one-time foreign-runtime bridge.
-            if await browser.export_cookies(portable_cookie_path(user_data_dir)):
-                print("   Cookies exported for Docker portability")
-                source_state = write_source_state(user_data_dir)
-                print(f"   Source session generation: {source_state.login_generation}")
-            else:
+            if not await browser.export_cookies(cookie_path):
                 print(
                     "   Warning: cookie export failed; Docker bridge may not work. "
                     "Run --login again to retry."
                 )
                 failure = RuntimeError("cookie export failed")
                 return False
-            print(f"Profile saved to {user_data_dir}")
+            print("   Cookies exported for Docker portability")
             return True
         except BaseException as exc:
             failure = exc

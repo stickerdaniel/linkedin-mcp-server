@@ -319,6 +319,9 @@ async def test_finished_tasks_are_observed_without_reconciliation(
             raise asyncio.CancelledError
         return outcome == "success" if kind == "import" else None
 
+    if (kind, outcome) == ("login", "success"):
+        # What the login left on disk, as a successful one does.
+        _store_session()
     task = asyncio.create_task(work())
     setattr(state, f"{kind}_task", task)
     field = "auto_import" if kind == "import" else kind
@@ -418,7 +421,6 @@ async def test_status_preserves_previous_login_failure_in_the_retry(
         bootstrap, "start_background_browser_setup_if_needed", AsyncMock()
     )
     monkeypatch.setattr(bootstrap, "_auto_import_allowed", lambda: False)
-    monkeypatch.setattr(bootstrap, "_move_invalid_auth_state_aside", lambda *_: None)
     hold = asyncio.Event()
     monkeypatch.setattr(bootstrap, "_run_login_flow", hold.wait)
     try:

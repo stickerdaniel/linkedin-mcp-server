@@ -1,22 +1,35 @@
 import asyncio
 import pathlib
-from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
 from linkedin_mcp_server.config.schema import AppConfig
-from linkedin_mcp_server.session_state import portable_cookie_path
+from linkedin_mcp_server.login_attempt import attempts_root
+from linkedin_mcp_server.session_state import (
+    load_source_state,
+    portable_cookie_path,
+    quarantine_dirs,
+    write_source_state,
+)
 from linkedin_mcp_server.setup import interactive_login
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
 
 
 class _BrowserContextManager:
-    def __init__(self, browser):
+    """A login browser that writes into the directory it was given, as Chromium does."""
+
+    def __init__(self, browser, user_data_dir, on_enter=None):
         self.browser = browser
+        self.user_data_dir = pathlib.Path(user_data_dir)
+        self.on_enter = on_enter
 
     async def __aenter__(self):
+        (self.user_data_dir / "Default").mkdir(parents=True, exist_ok=True)
+        (self.user_data_dir / "Default" / "Cookies").write_text("new session")
+        if self.on_enter is not None:
+            self.on_enter(self.user_data_dir)
         return self.browser
 
     async def __aexit__(self, exc_type, exc, tb):
@@ -31,8 +44,23 @@ def _make_browser(*, export_cookies: bool) -> MagicMock:
     browser.context.cookies = AsyncMock(
         return_value=[{"name": "li_at", "domain": ".linkedin.com"}]
     )
-    browser.export_cookies = AsyncMock(return_value=export_cookies)
+
+    async def export(path):
+        if export_cookies:
+            pathlib.Path(path).write_text("[]")
+        return export_cookies
+
+    browser.export_cookies = AsyncMock(side_effect=export)
     return browser
+
+
+def _factory(browser, *, captured: dict | None = None, on_enter=None):
+    def build(**kwargs):
+        if captured is not None:
+            captured.update(kwargs)
+        return _BrowserContextManager(browser, kwargs["user_data_dir"], on_enter)
+
+    return build
 
 
 def _patch_login_deps(
@@ -40,8 +68,6 @@ def _patch_login_deps(
     *,
     browser_factory,
     config: AppConfig | None = None,
-    write_source_state: MagicMock | None = None,
-    rotate_source_profile: MagicMock | None = None,
     close_browser: AsyncMock | None = None,
 ) -> None:
     """Patch all interactive_login dependencies in one place."""
@@ -54,70 +80,63 @@ def _patch_login_deps(
         AsyncMock(return_value=False),
     )
     monkeypatch.setattr("linkedin_mcp_server.setup.wait_for_manual_login", AsyncMock())
-    monkeypatch.setattr(
-        "linkedin_mcp_server.setup.write_source_state",
-        write_source_state
-        or MagicMock(return_value=SimpleNamespace(login_generation="gen-1")),
-    )
     monkeypatch.setattr("linkedin_mcp_server.setup.asyncio.sleep", AsyncMock())
-    rotate = rotate_source_profile or MagicMock(return_value=None)
-    monkeypatch.setattr(
-        "linkedin_mcp_server.setup.rotate_shielded",
-        AsyncMock(side_effect=lambda *a: rotate(*a)),
-    )
     monkeypatch.setattr(
         "linkedin_mcp_server.setup.close_browser", close_browser or AsyncMock()
     )
 
 
+def _write_session(profile_dir: pathlib.Path) -> str:
+    (profile_dir / "Default").mkdir(parents=True, exist_ok=True)
+    (profile_dir / "Default" / "Cookies").write_text("previous session")
+    portable_cookie_path(profile_dir).write_text('["previous"]')
+    return write_source_state(profile_dir).login_generation
+
+
+def _attempts_left(profile_dir: pathlib.Path) -> list[str]:
+    root = attempts_root(profile_dir)
+    return sorted(entry.name for entry in root.iterdir()) if root.is_dir() else []
+
+
 @pytest.mark.asyncio
 async def test_interactive_login_writes_source_state_when_cookie_export_succeeds(
-    monkeypatch, tmp_path, capsys
+    isolate_profile_dir, monkeypatch, capsys
 ):
+    profile = isolate_profile_dir
     browser = _make_browser(export_cookies=True)
-    write_source_state = MagicMock(
-        return_value=SimpleNamespace(login_generation="gen-123")
-    )
+    _patch_login_deps(monkeypatch, browser_factory=_factory(browser))
 
-    _patch_login_deps(
-        monkeypatch,
-        browser_factory=lambda **kwargs: _BrowserContextManager(browser),
-        write_source_state=write_source_state,
-    )
+    assert await interactive_login(profile) is True
 
-    assert await interactive_login(tmp_path / "profile") is True
-
-    browser.export_cookies.assert_awaited_once_with(
-        portable_cookie_path(tmp_path / "profile")
-    )
-    write_source_state.assert_called_once_with(tmp_path / "profile")
+    state = load_source_state(profile)
+    assert state is not None
+    assert state.profile_path == str(profile)
+    assert portable_cookie_path(profile).read_text() == "[]"
+    assert (profile / "Default" / "Cookies").read_text() == "new session"
     captured = capsys.readouterr()
     assert "cookies exported for docker portability" in captured.out.lower()
-    assert "source session generation: gen-123" in captured.out.lower()
+    assert f"source session generation: {state.login_generation}" in (
+        captured.out.lower()
+    )
+    assert _attempts_left(profile) == []
 
 
 @pytest.mark.asyncio
 async def test_interactive_login_returns_false_when_cookie_export_fails(
-    monkeypatch, tmp_path, capsys
+    isolate_profile_dir, monkeypatch, capsys
 ):
+    profile = isolate_profile_dir
     browser = _make_browser(export_cookies=False)
-    write_source_state = MagicMock()
+    _patch_login_deps(monkeypatch, browser_factory=_factory(browser))
 
-    _patch_login_deps(
-        monkeypatch,
-        browser_factory=lambda **kwargs: _BrowserContextManager(browser),
-        write_source_state=write_source_state,
-    )
+    assert await interactive_login(profile) is False
 
-    assert await interactive_login(tmp_path / "profile") is False
-
-    browser.export_cookies.assert_awaited_once_with(
-        portable_cookie_path(tmp_path / "profile")
-    )
-    write_source_state.assert_not_called()
+    assert load_source_state(profile) is None
+    assert not portable_cookie_path(profile).exists()
     captured = capsys.readouterr()
     assert "warning: cookie export failed" in captured.out.lower()
     assert "profile saved to" not in captured.out.lower()
+    assert _attempts_left(profile) == []
 
 
 @pytest.mark.asyncio
@@ -128,14 +147,14 @@ async def test_interactive_login_passes_chrome_path_to_browser_manager(
     browser = _make_browser(export_cookies=True)
     captured_kwargs: dict = {}
 
-    def fake_browser_manager(**kwargs):
-        captured_kwargs.update(kwargs)
-        return _BrowserContextManager(browser)
-
     config = AppConfig()
     config.browser.chrome_path = "/custom/chrome"
 
-    _patch_login_deps(monkeypatch, browser_factory=fake_browser_manager, config=config)
+    _patch_login_deps(
+        monkeypatch,
+        browser_factory=_factory(browser, captured=captured_kwargs),
+        config=config,
+    )
 
     await interactive_login(tmp_path / "profile")
 
@@ -148,22 +167,24 @@ async def test_interactive_login_forwards_all_browser_params(monkeypatch, tmp_pa
     browser = _make_browser(export_cookies=True)
     captured_kwargs: dict = {}
 
-    def fake_browser_manager(**kwargs):
-        captured_kwargs.update(kwargs)
-        return _BrowserContextManager(browser)
-
     config = AppConfig()
     config.browser.chrome_path = "/custom/chrome"
     config.browser.slow_mo = 250
     config.browser.viewport_width = 1920
     config.browser.viewport_height = 1080
 
-    _patch_login_deps(monkeypatch, browser_factory=fake_browser_manager, config=config)
+    _patch_login_deps(
+        monkeypatch,
+        browser_factory=_factory(browser, captured=captured_kwargs),
+        config=config,
+    )
 
     profile = tmp_path / "profile"
     await interactive_login(profile)
 
-    assert captured_kwargs["user_data_dir"] == profile
+    login_dir = pathlib.Path(captured_kwargs["user_data_dir"])
+    assert login_dir.parent.parent == attempts_root(profile)
+    assert login_dir.name == "profile"
     assert captured_kwargs["headless"] is False
     assert captured_kwargs["slow_mo"] == 250
     assert captured_kwargs["viewport"] == {"width": 1920, "height": 1080}
@@ -182,14 +203,14 @@ async def test_login_keeps_webrtc_on_the_proxy(monkeypatch, tmp_path):
     browser = _make_browser(export_cookies=True)
     captured_kwargs: dict = {}
 
-    def fake_browser_manager(**kwargs):
-        captured_kwargs.update(kwargs)
-        return _BrowserContextManager(browser)
-
     config = AppConfig()
     config.browser.proxy_server = "http://gate.example:7000"
 
-    _patch_login_deps(monkeypatch, browser_factory=fake_browser_manager, config=config)
+    _patch_login_deps(
+        monkeypatch,
+        browser_factory=_factory(browser, captured=captured_kwargs),
+        config=config,
+    )
 
     await interactive_login(tmp_path / "profile")
 
@@ -207,14 +228,14 @@ async def test_interactive_login_passes_slow_mo_to_browser_manager(
     browser = _make_browser(export_cookies=True)
     captured_kwargs: dict = {}
 
-    def fake_browser_manager(**kwargs):
-        captured_kwargs.update(kwargs)
-        return _BrowserContextManager(browser)
-
     config = AppConfig()
     config.browser.slow_mo = 250
 
-    _patch_login_deps(monkeypatch, browser_factory=fake_browser_manager, config=config)
+    _patch_login_deps(
+        monkeypatch,
+        browser_factory=_factory(browser, captured=captured_kwargs),
+        config=config,
+    )
 
     await interactive_login(tmp_path / "profile")
 
@@ -228,11 +249,7 @@ async def test_interactive_login_threads_login_timeout(monkeypatch, tmp_path):
     config = AppConfig()
     config.browser.login_timeout_seconds = 600
 
-    _patch_login_deps(
-        monkeypatch,
-        browser_factory=lambda **kwargs: _BrowserContextManager(browser),
-        config=config,
-    )
+    _patch_login_deps(monkeypatch, browser_factory=_factory(browser), config=config)
     wait_mock = AsyncMock()
     monkeypatch.setattr("linkedin_mcp_server.setup.wait_for_manual_login", wait_mock)
 
@@ -253,11 +270,7 @@ async def test_interactive_login_threads_login_timeout_zero_unlimited(
     config = AppConfig()
     config.browser.login_timeout_seconds = 0
 
-    _patch_login_deps(
-        monkeypatch,
-        browser_factory=lambda **kwargs: _BrowserContextManager(browser),
-        config=config,
-    )
+    _patch_login_deps(monkeypatch, browser_factory=_factory(browser), config=config)
     wait_mock = AsyncMock()
     monkeypatch.setattr("linkedin_mcp_server.setup.wait_for_manual_login", wait_mock)
 
@@ -277,15 +290,15 @@ async def test_interactive_login_passes_viewport_to_browser_manager(
     browser = _make_browser(export_cookies=True)
     captured_kwargs: dict = {}
 
-    def fake_browser_manager(**kwargs):
-        captured_kwargs.update(kwargs)
-        return _BrowserContextManager(browser)
-
     config = AppConfig()
     config.browser.viewport_width = 1920
     config.browser.viewport_height = 1080
 
-    _patch_login_deps(monkeypatch, browser_factory=fake_browser_manager, config=config)
+    _patch_login_deps(
+        monkeypatch,
+        browser_factory=_factory(browser, captured=captured_kwargs),
+        config=config,
+    )
 
     await interactive_login(tmp_path / "profile")
 
@@ -293,74 +306,105 @@ async def test_interactive_login_passes_viewport_to_browser_manager(
 
 
 @pytest.mark.asyncio
-async def test_interactive_login_retires_the_previous_profile(monkeypatch, tmp_path):
-    """A manual login may be for a different account, so the previous Chromium
-    profile must not be reused: it would carry the same machine_id into the new
-    session and present both accounts to LinkedIn as one device."""
-    profile_dir = tmp_path / "profile"
-    rotate = MagicMock(return_value=None)
+async def test_the_source_is_untouched_while_the_login_browser_runs(
+    isolate_profile_dir, monkeypatch
+):
+    """The login browser gets an empty directory of its own. The previous
+    session stays readable at the source until the new one is published, and
+    the singleton is closed before anything else, because it exports its
+    cookies on teardown."""
+    profile = isolate_profile_dir
+    previous = _write_session(profile)
     order: list[str] = []
-    rotate.side_effect = lambda *_args: order.append("rotate")
+    seen: dict[str, object] = {}
+
+    def at_launch(login_dir: pathlib.Path) -> None:
+        order.append("launch")
+        state = load_source_state(profile)
+        seen["generation"] = None if state is None else state.login_generation
+        seen["cookies"] = (profile / "Default" / "Cookies").read_text()
+        seen["login_dir"] = login_dir
 
     _patch_login_deps(
         monkeypatch,
-        browser_factory=lambda **kwargs: (
-            order.append("launch"),
-            _BrowserContextManager(_make_browser(export_cookies=True)),
-        )[1],
-        rotate_source_profile=rotate,
+        browser_factory=_factory(
+            _make_browser(export_cookies=True), on_enter=at_launch
+        ),
         close_browser=AsyncMock(side_effect=lambda: order.append("close")),
     )
 
-    await interactive_login(profile_dir)
+    assert await interactive_login(profile) is True
 
-    rotate.assert_called_once_with(profile_dir)
-    # close must come first: the singleton exports cookies on teardown, so a
-    # later close would write the retired session's cookies over the new ones.
-    assert order == ["close", "rotate", "launch"]
+    assert order[:2] == ["close", "launch"]
+    assert seen["generation"] == previous
+    assert seen["cookies"] == "previous session"
+    assert seen["login_dir"] != profile
+    published = load_source_state(profile)
+    assert published is not None and published.login_generation != previous
+    assert (profile / "Default" / "Cookies").read_text() == "new session"
+    # The replaced session is retired, not deleted.
+    retired = quarantine_dirs(profile)
+    assert len(retired) == 1
+    assert (retired[0] / "profile" / "Default" / "Cookies").read_text() == (
+        "previous session"
+    )
+    assert _attempts_left(profile) == []
 
 
 @pytest.mark.asyncio
-async def test_interactive_login_restores_the_session_when_login_fails(
-    monkeypatch, tmp_path
+async def test_a_failed_login_leaves_the_source_as_it_was(
+    isolate_profile_dir, monkeypatch
 ):
-    """The old session is retired before the new one exists, so a failed login
-    must not leave the user logged out of a session that was working."""
-    retired = tmp_path / "invalid-state-x"
-    restore = MagicMock(return_value=True)
+    profile = isolate_profile_dir
+    previous = _write_session(profile)
 
     _patch_login_deps(
         monkeypatch,
-        browser_factory=lambda **kwargs: _BrowserContextManager(
-            _make_browser(export_cookies=False)
-        ),
-        rotate_source_profile=MagicMock(return_value=retired),
+        browser_factory=_factory(_make_browser(export_cookies=False)),
     )
-    monkeypatch.setattr("linkedin_mcp_server.setup.restore_source_profile", restore)
 
-    assert await interactive_login(tmp_path / "profile") is False
+    assert await interactive_login(profile) is False
 
-    restore.assert_called_once_with(retired, tmp_path / "profile")
+    state = load_source_state(profile)
+    assert state is not None and state.login_generation == previous
+    assert (profile / "Default" / "Cookies").read_text() == "previous session"
+    assert portable_cookie_path(profile).read_text() == '["previous"]'
+    assert quarantine_dirs(profile) == []
+    assert _attempts_left(profile) == []
 
 
 @pytest.mark.asyncio
-async def test_interactive_login_keeps_the_retired_session_on_success(
-    monkeypatch, tmp_path
+async def test_a_cancelled_login_leaves_the_source_as_it_was(
+    isolate_profile_dir, monkeypatch
 ):
-    restore = MagicMock()
+    profile = isolate_profile_dir
+    previous = _write_session(profile)
+    entered = asyncio.Event()
+
+    async def never_signs_in(*_args, **_kwargs):
+        entered.set()
+        await asyncio.Event().wait()
 
     _patch_login_deps(
         monkeypatch,
-        browser_factory=lambda **kwargs: _BrowserContextManager(
-            _make_browser(export_cookies=True)
-        ),
-        rotate_source_profile=MagicMock(return_value=tmp_path / "invalid-state-x"),
+        browser_factory=_factory(_make_browser(export_cookies=True)),
     )
-    monkeypatch.setattr("linkedin_mcp_server.setup.restore_source_profile", restore)
+    monkeypatch.setattr(
+        "linkedin_mcp_server.setup.wait_for_manual_login", never_signs_in
+    )
 
-    assert await interactive_login(tmp_path / "profile") is True
+    task = asyncio.ensure_future(interactive_login(profile))
+    await entered.wait()
+    assert len(_attempts_left(profile)) == 2
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
 
-    restore.assert_not_called()
+    state = load_source_state(profile)
+    assert state is not None and state.login_generation == previous
+    assert (profile / "Default" / "Cookies").read_text() == "previous session"
+    assert quarantine_dirs(profile) == []
+    assert _attempts_left(profile) == []
 
 
 @pytest.mark.asyncio
@@ -469,9 +513,7 @@ async def test_interactive_login_forwards_the_proxy(monkeypatch, tmp_path):
     browser = _make_browser(export_cookies=True)
     captured_kwargs: dict = {}
 
-    def fake_browser_manager(**kwargs):
-        captured_kwargs.update(kwargs)
-        return _BrowserContextManager(browser)
+    fake_browser_manager = _factory(browser, captured=captured_kwargs)
 
     config = AppConfig()
     config.browser.proxy_server = "http://gate.example:7000"
@@ -494,9 +536,7 @@ async def test_interactive_login_without_proxy_omits_the_key(monkeypatch, tmp_pa
     browser = _make_browser(export_cookies=True)
     captured_kwargs: dict = {}
 
-    def fake_browser_manager(**kwargs):
-        captured_kwargs.update(kwargs)
-        return _BrowserContextManager(browser)
+    fake_browser_manager = _factory(browser, captured=captured_kwargs)
 
     _patch_login_deps(
         monkeypatch, browser_factory=fake_browser_manager, config=AppConfig()
