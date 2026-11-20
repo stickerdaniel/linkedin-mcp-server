@@ -442,8 +442,9 @@ async def _forwarded(
             return error_result(INPUT_OUTCOME_UNKNOWN, ErrorCode.OUTCOME_UNKNOWN)
         return _reply({"access": "unavailable", "input": "refused"})
     if operation == "login_view_release" and sent.delivery == "lost":
-        # Sent and not answered: the login may be ending.
-        return _reply({"release": "ending"})
+        # Sent and not answered: whether the owner ended the login is unknown.
+        # Never sent again.
+        return _reply({"release": "unknown"})
     return _reply({"access": "unavailable"})
 
 

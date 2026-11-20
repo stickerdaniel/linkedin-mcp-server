@@ -68,6 +68,8 @@ const RETRY_MS = 1000;
 // Transport failures of an attach are retried this often, with growing waits.
 const ATTACH_RETRIES = 3;
 const ATTACH_BACKOFF_MS = 500;
+// The attach tool's own timeout, the longest the way out waits for its grant.
+const ATTACH_WAIT_MS = 10000;
 const MAC = /mac|iphone|ipad/i.test(navigator.userAgentData?.platform || navigator.platform || '');
 const NAMED_KEYS = new Set(['Enter', 'Tab', 'Backspace', 'Delete', 'Escape', 'ArrowUp',
   'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Home', 'End', 'PageUp', 'PageDown']);
@@ -163,8 +165,13 @@ function end(tone, message) {
 async function signInOutside() {
   if (leaving) return;
   leaving = true;
-  const held = grant && !ended ? { grant, attempt_id: attemptId } : null;
-  end('waiting', 'Ending the sign-in in the chat.');
+  const asked = binding;
+  if (asked && !grant && !ended && attaching?.binding === asked) {
+    await Promise.race([attaching.done, sleep(ATTACH_WAIT_MS)]);
+  }
+  // Only the grant of the binding shown at the click ends a login.
+  const held = grant && !ended && binding === asked ? { grant, attempt_id: attemptId } : null;
+  end('waiting', held ? 'Ending the sign-in in the chat.' : MAYBE_HELD);
   let release = null;
   if (held) {
     try {
@@ -249,10 +256,13 @@ app.onteardown = async () => {
 
 // One attach in flight per binding. Its answer counts only while that binding
 // is still the current one and the view has not ended.
-async function attach() {
+function attach() {
   const asked = binding;
-  if (!connected || !asked || ended || grant || attaching === asked || attachTimer) return;
-  attaching = asked;
+  if (!connected || !asked || ended || grant || attaching?.binding === asked || attachTimer) return;
+  attaching = { binding: asked, done: attachTo(asked) };
+}
+
+async function attachTo(asked) {
   let result = null;
   try {
     result = await app.callServerTool({

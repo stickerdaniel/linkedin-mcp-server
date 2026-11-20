@@ -771,6 +771,55 @@ async def test_a_relayed_release_frees_the_profile_the_owners_login_holds(
     assert free_for_another_process(short_root)
 
 
+async def test_a_relayed_release_past_the_wait_answers_ending(
+    short_root: Path, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.setattr(bootstrap, "get_profile_dir", lambda: short_root)
+    monkeypatch.setattr(login_app, "RELEASE_WAIT_S", 0.2)
+    browser = hold_the_profile(monkeypatch, short_root)
+    browser.cleanup.clear()
+    async with _ui_client(create_mcp_server()) as owner:
+        async with Client(create_mcp_server()) as other:
+            view = await _relayed_view_from(other, await _open_shown(owner))
+            await asyncio.wait_for(browser.opened.wait(), 10)
+
+            released = await _release(other, view)
+            browser.cleanup.set()
+            await _until(other, view, "cancelled")
+
+    assert _reply(released) == {"access": "full", "release": "ending"}
+
+
+async def test_a_release_the_owner_never_answered_is_unknown(
+    login: StandInLogin,
+):
+    attempt_id = "ABCDEFGHIJKL"
+    path = login_relay.endpoint_path(attempt_id)
+    assert path is not None
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    accepted = asyncio.Event()
+
+    async def drop_unread(
+        _reader: asyncio.StreamReader, writer: asyncio.StreamWriter
+    ) -> None:
+        accepted.set()
+        writer.transport.abort()
+
+    server = await asyncio.start_unix_server(drop_unread, path=str(path))
+    try:
+        async with Client(create_mcp_server()) as other:
+            result = await other.call_tool_mcp(
+                "login_view_release", {"grant": "g", "attempt_id": attempt_id}
+            )
+    finally:
+        server.close()
+        await server.wait_closed()
+
+    assert accepted.is_set()
+    assert not result.is_error
+    assert _reply(result) == {"release": "unknown"}
+
+
 async def _relayed_view_from(other: Client, shown: dict[str, str]) -> dict[str, str]:
     result, view = await _attach(other, shown)
     assert view is not None, _text(result)

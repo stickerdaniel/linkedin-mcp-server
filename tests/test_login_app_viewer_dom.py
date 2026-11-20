@@ -730,9 +730,10 @@ async def test_the_paste_hint_names_the_platforms_shortcut(
         ({"access": "full", "release": "released"}, RELEASED),
         ({"access": "full", "release": "ending"}, MAYBE_HELD),
         ({"access": "full", "release": "held"}, MAYBE_HELD),
+        ({"release": "unknown"}, MAYBE_HELD),
         ({"access": "expired"}, MAYBE_HELD),
     ],
-    ids=["released", "ending", "held", "refused"],
+    ids=["released", "ending", "held", "unknown", "refused"],
 )
 async def test_the_button_ends_the_login_here_then_opens_the_guide(
     viewer: Any, release: dict[str, str], message: str
@@ -765,6 +766,84 @@ async def test_a_view_without_its_grant_only_opens_the_guide(viewer: Any):
     )
 
     await viewer.click("#outside")
+    await viewer.wait_for_function("bridge.links.length === 1")
+    await answer_link(viewer, 0, {})
+    await wait_for_text(viewer, MAYBE_HELD)
+
+    assert await calls(viewer, "login_view_release") == []
+
+
+async def test_a_click_before_the_attach_answers_releases_with_its_grant(
+    viewer: Any,
+):
+    await connect(viewer)
+    await deliver(viewer, shown(open_id="O2", attempt_id="A2"))
+    await wait_for_calls(viewer, "login_view_attach", 1)
+
+    await viewer.click("#outside")
+    await viewer.wait_for_timeout(150)
+    assert await calls(viewer, "login_view_release") == []
+    await answer(
+        viewer,
+        "login_view_attach",
+        0,
+        attached(grant="G2", open_id="O2", attempt_id="A2"),
+    )
+    await wait_for_calls(viewer, "login_view_release", 1)
+    await viewer.wait_for_timeout(150)
+    links_before_release = await links(viewer)
+    await answer(
+        viewer, "login_view_release", 0, frame(access="full", release="released")
+    )
+    await viewer.wait_for_function("bridge.links.length === 1")
+    await answer_link(viewer, 0, {})
+    await wait_for_text(viewer, RELEASED)
+
+    assert links_before_release == []
+    assert await calls(viewer, "login_view_release") == [
+        {"grant": "G2", "attempt_id": "A2"}
+    ]
+    assert await links(viewer) == [GUIDE]
+
+
+async def test_a_click_before_an_attach_that_fails_only_opens_the_guide(
+    viewer: Any,
+):
+    await connect(viewer)
+    await show_the_sign_in(viewer)
+    await wait_for_calls(viewer, "login_view_attach", 1)
+
+    await viewer.click("#outside")
+    await fail(viewer, "login_view_attach", 0)
+    await viewer.wait_for_function("bridge.links.length === 1")
+    status_during_link = await viewer.locator("#text").inner_text()
+    await answer_link(viewer, 0, {})
+    await wait_for_text(viewer, MAYBE_HELD)
+    await viewer.wait_for_timeout(700)
+
+    assert status_during_link == MAYBE_HELD
+    assert await calls(viewer, "login_view_release") == []
+    assert await calls(viewer, "login_view_attach") == [
+        {"attempt_id": "A1", "open_id": "O1"}
+    ]
+    assert await links(viewer) == [GUIDE]
+
+
+async def test_a_click_never_releases_a_sign_in_shown_after_it(viewer: Any):
+    await connect(viewer)
+    await show_the_sign_in(viewer)
+    await wait_for_calls(viewer, "login_view_attach", 1)
+
+    await viewer.click("#outside")
+    await deliver(viewer, shown(open_id="O2", attempt_id="A2"))
+    await wait_for_calls(viewer, "login_view_attach", 2)
+    await answer(
+        viewer,
+        "login_view_attach",
+        1,
+        attached(grant="G2", open_id="O2", attempt_id="A2"),
+    )
+    await answer(viewer, "login_view_attach", 0, attached())
     await viewer.wait_for_function("bridge.links.length === 1")
     await answer_link(viewer, 0, {})
     await wait_for_text(viewer, MAYBE_HELD)
