@@ -22,7 +22,7 @@
   #screen { order: 0; flex: none; display: block; width: 100%; height: auto; background: #fff; outline: none; cursor: default; }
   #screen[hidden] { display: none; }
   #screen:focus-visible { box-shadow: inset 0 0 0 2px var(--color-ring-primary, #0a66c2); }
-  #status { order: 1; display: flex; gap: 8px; align-items: center; padding: 8px 12px; }
+  #status { order: 1; display: flex; flex-wrap: wrap; gap: 8px; align-items: center; padding: 8px 12px; }
   body.live #status { border-top: 1px solid var(--color-border-secondary, rgba(127, 127, 127, 0.3)); }
   body.ended #status { padding: 14px 12px; color: var(--color-text-primary, inherit); }
   body.live #text { color: var(--color-text-primary, inherit); }
@@ -168,6 +168,7 @@ async function signInOutside() {
   const asked = binding;
   if (asked && !grant && !ended && attaching?.binding === asked) {
     await Promise.race([attaching.done, sleep(ATTACH_WAIT_MS)]);
+    if (tornDown) return;
   }
   // Only the grant of the binding shown at the click ends a login.
   const held = grant && !ended && binding === asked ? { grant, attempt_id: attemptId } : null;
@@ -180,6 +181,7 @@ async function signInOutside() {
     } catch {
       release = null;
     }
+    if (tornDown) return;
   }
   const message = release === 'released' ? RELEASED : MAYBE_HELD;
   if (app.getHostCapabilities()?.openLinks) {
@@ -188,6 +190,7 @@ async function signInOutside() {
     try {
       await app.openLink({ url: GUIDE });
     } catch {}
+    if (tornDown) return;
     end('info', message);
   } else {
     end('info', `${message} Guide: ${GUIDE}`);

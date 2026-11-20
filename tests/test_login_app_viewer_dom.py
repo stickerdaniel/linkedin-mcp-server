@@ -773,6 +773,60 @@ async def test_a_view_without_its_grant_only_opens_the_guide(viewer: Any):
     assert await calls(viewer, "login_view_release") == []
 
 
+async def test_teardown_during_the_attach_wait_opens_no_link(viewer: Any):
+    await connect(viewer)
+    await deliver(viewer, shown(open_id="O2", attempt_id="A2"))
+    await wait_for_calls(viewer, "login_view_attach", 1)
+
+    await viewer.click("#outside")
+    await viewer.evaluate("bridge.onteardown({}, {})", isolated_context=False)
+    await answer(
+        viewer,
+        "login_view_attach",
+        0,
+        attached(grant="G2", open_id="O2", attempt_id="A2"),
+    )
+    await viewer.wait_for_timeout(300)
+
+    assert await calls(viewer, "login_view_release") == []
+    assert await links(viewer) == []
+
+
+async def test_teardown_during_the_release_opens_no_link(viewer: Any):
+    await live(viewer)
+
+    await viewer.click("#outside")
+    await wait_for_calls(viewer, "login_view_release", 1)
+    await viewer.evaluate("bridge.onteardown({}, {})", isolated_context=False)
+    await answer(
+        viewer, "login_view_release", 0, frame(access="full", release="released")
+    )
+    await viewer.wait_for_timeout(300)
+
+    assert await links(viewer) == []
+
+
+async def test_a_narrow_card_keeps_the_message_readable_and_the_button_close(
+    viewer: Any,
+):
+    await viewer.set_viewport_size({"width": 300, "height": 800})
+    await live(viewer)
+
+    await viewer.click("#outside")
+    await wait_for_calls(viewer, "login_view_release", 1)
+    await answer(viewer, "login_view_release", 0, frame(access="full", release="held"))
+    await viewer.wait_for_function("bridge.links.length === 1")
+    await answer_link(viewer, 0, {"isError": True})
+    await wait_for_text(viewer, MAYBE_HELD)
+
+    status = await viewer.locator("#status").bounding_box()
+    text = await viewer.locator("#text").bounding_box()
+    assert status is not None and text is not None
+    assert text["width"] > 200
+    assert status["height"] < 200
+    assert await viewer.locator("#outside").is_visible()
+
+
 async def test_a_click_before_the_attach_answers_releases_with_its_grant(
     viewer: Any,
 ):
