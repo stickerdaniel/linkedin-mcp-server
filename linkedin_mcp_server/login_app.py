@@ -112,12 +112,18 @@ _NOT_HERE = (
 Access = Literal["full", "status", "replaced", "expired", "denied"]
 
 
+def _transport_allows_view() -> bool:
+    """Whether this server may show a sign-in view at all: Direct, over stdio."""
+    return (
+        process_role() is ServerRole.DIRECT and get_config().server.transport == "stdio"
+    )
+
+
 def view_available(ctx: Context | None) -> bool:
     """Whether this call's client may be given the sign-in view."""
     return (
         ctx is not None
-        and process_role() is ServerRole.DIRECT
-        and get_config().server.transport == "stdio"
+        and _transport_allows_view()
         and ctx.client_supports_extension(UI_EXTENSION_ID)
     )
 
@@ -436,7 +442,10 @@ def register_login_app(mcp: FastMCP, *, tool_timeout: float) -> None:
         open_id: Annotated[str, Field(max_length=64)],
     ) -> ToolResult:
         """Called by the sign-in view: the grant for the open its result named."""
-        if not view_available(ctx):
+        # The open already proves the client could show the view: only a shown
+        # open_login creates one. The extension is not checked again here,
+        # because Claude Desktop does not repeat it on calls its app makes.
+        if not _transport_allows_view():
             return _reply({"access": "none"})
         outcome, opened = grants.attach(attempt_id, open_id)
         if opened is None or opened.secret is None:

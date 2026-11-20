@@ -528,22 +528,23 @@ class TestAttach:
         assert after_view is None and _reply(after) == {"access": "none"}
         assert _reply(await _frame(client, view)) == {"access": "expired"}
 
-    async def test_attach_checks_the_client_too(
+    async def test_attach_rests_on_the_shown_open_not_on_each_calls_extension(
         self, login: StandInLogin, monkeypatch: pytest.MonkeyPatch
     ):
+        # Claude Desktop does not repeat the apps extension on the calls its app
+        # makes, so the page's attach arrives like a plain client's.
         server = create_mcp_server()
         async with _ui_client(server) as ui:
-            shown = await _open_shown(ui)
             async with Client(server) as plain:
-                plain_result, plain_view = await _attach(plain, shown)
+                unopened = await plain.call_tool_mcp("open_login", {})
+                shown = await _open_shown(ui)
+                _, plain_view = await _attach(plain, shown)
             monkeypatch.setattr(get_config().server, "transport", "streamable-http")
             http_result, http_view = await _attach(ui, shown)
-            monkeypatch.setattr(get_config().server, "transport", "stdio")
-            _, ui_view = await _attach(ui, shown)
 
-        assert plain_view is None and _reply(plain_result) == {"access": "none"}
+        assert _shown(unopened) is None
+        assert plain_view is not None
         assert http_view is None and _reply(http_result) == {"access": "none"}
-        assert ui_view is not None
 
 
 class TestTheGrant:
