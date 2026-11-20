@@ -827,7 +827,7 @@ def get_bootstrap_state() -> BootstrapState:
     return _state
 
 
-def bootstrap_observation() -> dict[str, str | bool]:
+def bootstrap_observation(*, stored: bool) -> dict[str, str | bool]:
     from linkedin_mcp_server.core.exceptions import AccountRestrictedError
 
     setup = _state.setup_state.value
@@ -851,17 +851,14 @@ def bootstrap_observation() -> dict[str, str | bool]:
                 restricted = isinstance(error, AccountRestrictedError)
     # A login that stood down for a peer, or a session another process logged
     # out since, leaves nothing on disk; a task's success alone is no session.
-    if login == AuthState.READY.value:
-        try:
-            ready = _auth_ready()
-        except UnicodeDecodeError:
-            ready = False
-        if not ready:
-            login = (
-                AuthState.FAILED.value
-                if task is not None and task.done()
-                else AuthState.IDLE.value
-            )
+    # *stored* is the caller's one read of the files, so the two fields of a
+    # status cannot disagree.
+    if login == AuthState.READY.value and not stored:
+        login = (
+            AuthState.FAILED.value
+            if task is not None and task.done()
+            else AuthState.IDLE.value
+        )
 
     imported = "not_started"
     import_task = _state.import_task

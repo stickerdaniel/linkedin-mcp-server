@@ -659,3 +659,24 @@ async def test_authenticated_proxy_status_bypasses_browser_work_not_owner_admiss
         serving_owner.should_exit = True
         await asyncio.wait_for(serving, 10)
         listener.close()
+
+
+async def test_a_session_published_while_answering_is_reported_consistently(
+    server, nothing_may_start, monkeypatch
+):
+    bootstrap.get_bootstrap_state().auth_state = bootstrap.AuthState.READY
+    reads = iter([False, True, True])
+
+    def published_after_the_first_read(*_args, **_kwargs):
+        return next(reads)
+
+    for module in ("session_status", "bootstrap"):
+        monkeypatch.setattr(
+            f"linkedin_mcp_server.{module}._auth_ready",
+            published_after_the_first_read,
+        )
+
+    status = await _status(server)
+
+    assert status["session"]["stored"] is False
+    assert status["login"] != "auth_ready"
