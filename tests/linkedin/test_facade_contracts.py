@@ -7,6 +7,7 @@ from typing import cast
 from unittest.mock import AsyncMock, patch
 
 import inspect
+from urllib.parse import parse_qs, urlparse
 
 import pytest
 
@@ -321,6 +322,51 @@ async def test_facade_search_posts_forwards_its_content_type_filter(mock_page):
     assert "contentType=%5B%22documents%22%5D" in result["url"]
     with pytest.raises(FilterValidationError):
         await extractor.search_posts("unity", content_type="articles")
+
+
+@pytest.mark.parametrize("sort_by", ["date", "date_posted", "relevance"])
+async def test_facade_search_posts_keeps_existing_positions_and_forwards_sort(
+    mock_page, sort_by
+):
+    extractor = LinkedInExtractor(cast(Page, mock_page))
+
+    async def read(url, **kwargs):
+        mock_page.url = url
+        return ExtractedSection(text="post", references=[], error=None)
+
+    with patch.object(SectionCapture, "capture", side_effect=read) as capture:
+        result = await extractor.search_posts(
+            "SRE", "past-week", 2, "documents", sort_by
+        )
+
+    query = parse_qs(urlparse(result["url"]).query)
+    token = "relevance" if sort_by == "relevance" else "date_posted"
+    assert query["sortBy"] == [f'["{token}"]']
+    assert query["datePosted"] == ['["past-week"]']
+    assert query["contentType"] == ['["documents"]']
+    assert capture.call_args.kwargs["plan"].max_scrolls == 10
+    assert "section_errors" not in result
+
+
+async def test_facade_search_posts_legacy_positional_call_keeps_default_order(
+    mock_page,
+):
+    extractor = LinkedInExtractor(cast(Page, mock_page))
+    with patch.object(
+        SectionCapture,
+        "capture",
+        new_callable=AsyncMock,
+        return_value=ExtractedSection(text="post", references=[], error=None),
+    ):
+        result = await extractor.search_posts("SRE", "past-week", 2, "documents")
+
+    assert parse_qs(urlparse(result["url"]).query) == {
+        "keywords": ["SRE"],
+        "origin": ["FACETED_SEARCH"],
+        "datePosted": ['["past-week"]'],
+        "contentType": ['["documents"]'],
+    }
+    assert "section_errors" not in result
 
 
 async def test_facade_search_jobs_forwards_every_filter_in_order(mock_page):

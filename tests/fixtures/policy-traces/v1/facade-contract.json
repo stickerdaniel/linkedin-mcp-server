@@ -106,7 +106,7 @@
       },
       "search_posts": {
         "coroutine": true,
-        "signature": "(self, keywords: 'str', date_posted: 'str | None' = None, max_pages: 'int' = 3, content_type: 'str | None' = None) -> 'dict[str, Any]'"
+        "signature": "(self, keywords: 'str', date_posted: 'str | None' = None, max_pages: 'int' = 3, content_type: 'str | None' = None, sort_by: 'str | None' = None) -> 'dict[str, Any]'"
       },
       "send_message": {
         "coroutine": true,
@@ -879,6 +879,18 @@
               "maximum": 10,
               "minimum": 1,
               "type": "integer"
+            },
+            "sort_by": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Optional ``date`` (or ``date_posted``) for Latest,\n``relevance`` for Top match. Omit or leave blank to keep\nLinkedIn's default ordering."
             }
           },
           "required": [

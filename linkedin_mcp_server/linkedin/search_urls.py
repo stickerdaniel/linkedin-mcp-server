@@ -72,6 +72,12 @@ CONTENT_TYPE_MAP = {
     "documents": "documents",
 }
 
+CONTENT_SORT_BY_MAP = {
+    "date": "date_posted",
+    "date_posted": "date_posted",
+    "relevance": "relevance",
+}
+
 # Valid tokens for the people-search ``network`` facet.
 # LinkedIn accepts "F" (1st-degree), "S" (2nd-degree), "O" (3rd-degree and beyond).
 NETWORK_TOKENS = ("F", "S", "O")
@@ -228,6 +234,7 @@ def build_content_search_url(
     keywords: str,
     date_posted: str | None = None,
     content_type: str | None = None,
+    sort_by: str | None = None,
 ) -> str:
     """Build a LinkedIn content (post) search URL.
 
@@ -245,6 +252,10 @@ def build_content_search_url(
 
     ``content_type`` is refused the same way and for the same reason. It is
     written after ``datePosted``, the order the live page produces.
+
+    ``sort_by`` accepts ``date`` / ``date_posted`` for Latest and
+    ``relevance`` for Top match. It uses its own JSON-list facet, unlike
+    job search's ``sortBy=DD|R``. Omission keeps LinkedIn's default ordering.
     """
     if (
         date_posted is not None
@@ -266,6 +277,16 @@ def build_content_search_url(
             f"{list(CONTENT_TYPE_MAP)!r}."
         )
 
+    if (
+        sort_by is not None
+        and sort_by.strip()
+        and sort_by.strip() not in CONTENT_SORT_BY_MAP
+    ):
+        raise FilterValidationError(
+            f"Invalid sort_by {sort_by!r}; expected one of "
+            f"{list(CONTENT_SORT_BY_MAP)!r}."
+        )
+
     params = f"keywords={quote_plus(keywords)}&origin=FACETED_SEARCH"
     if date_posted and date_posted.strip():
         token = CONTENT_DATE_POSTED_MAP.get(date_posted.strip(), date_posted.strip())
@@ -273,4 +294,7 @@ def build_content_search_url(
     if content_type and content_type.strip():
         token = CONTENT_TYPE_MAP[content_type.strip()]
         params += f"&contentType={_encode_list_facet([token])}"
+    if sort_by and sort_by.strip():
+        token = CONTENT_SORT_BY_MAP[sort_by.strip()]
+        params += f"&sortBy={_encode_list_facet([token])}"
     return f"https://www.linkedin.com/search/results/content/?{params}"
