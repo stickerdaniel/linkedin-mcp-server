@@ -403,6 +403,40 @@ async def test_an_input_of_unknown_outcome_never_claims_it_was_lost(viewer: Any)
     assert len(await calls(viewer, "login_view_input")) == 1
 
 
+@pytest.mark.parametrize("ending", ["unknown outcome", "transport failure"])
+async def test_input_queued_behind_an_unknown_outcome_is_never_sent(
+    viewer: Any, ending: str
+):
+    await live(viewer)
+
+    # The click may not land, so the password typed behind it may reach
+    # whichever field still has focus.
+    await viewer.click("#screen")
+    await wait_for_calls(viewer, "login_view_input", 1)
+    await viewer.keyboard.type("hunter2")
+    if ending == "unknown outcome":
+        unknown = "The page may have received part of that input; check it before typing again."
+        await answer(
+            viewer,
+            "login_view_input",
+            0,
+            {"isError": True, "content": [{"type": "text", "text": unknown}]},
+        )
+    else:
+        await fail(viewer, "login_view_input", 0)
+    await viewer.wait_for_function(
+        "document.getElementById('text').textContent.includes('check it before')"
+    )
+    await viewer.wait_for_timeout(300)
+    assert len(await calls(viewer, "login_view_input")) == 1
+
+    await viewer.keyboard.type("x")
+    await wait_for_calls(viewer, "login_view_input", 2)
+
+    sent = await calls(viewer, "login_view_input")
+    assert sent[1]["events"] == [{"type": "type", "text": "x"}]
+
+
 async def test_a_paste_is_sent_once_and_its_shortcut_is_not(viewer: Any):
     await live(viewer)
     await viewer.evaluate(

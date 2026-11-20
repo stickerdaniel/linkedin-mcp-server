@@ -420,15 +420,19 @@ async function pump() {
         });
       } catch {
         // Whether the call failed before or after the server sent the batch
-        // on is unknown here, so nothing claims it did not arrive.
+        // on is unknown here, so nothing claims it did not arrive. Input
+        // queued behind it, such as a password typed after a click that may
+        // not have landed, is dropped until the user acts again.
+        queue.length = 0;
         if (!ended) show('problem', MAYBE_SENT);
-        continue;
+        break;
       }
       if (result.isError) {
         // Such as a batch whose answer never came back from the process that
         // runs the sign-in: the server's text says what is known.
+        queue.length = 0;
         if (!ended) show('problem', textOf(result) || MAYBE_SENT);
-        continue;
+        break;
       }
       let reply = {};
       try {

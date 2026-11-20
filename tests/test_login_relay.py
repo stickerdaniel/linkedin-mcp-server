@@ -47,7 +47,7 @@ from linkedin_mcp_server import login_relay, session_state
 from linkedin_mcp_server.config import reset_config
 from linkedin_mcp_server.exceptions import ProfileRootRefusedError
 from linkedin_mcp_server.login_relay import Envelope, RelayProtocolError
-from linkedin_mcp_server.login_view import LoginAttempt
+from linkedin_mcp_server.login_view import MAX_IMAGE_BASE64, LoginAttempt
 from linkedin_mcp_server.profile_claim import ensure_profile_claim
 from linkedin_mcp_server.server import create_mcp_server
 
@@ -249,6 +249,7 @@ class TestEndpoints:
         login_relay.serve(attempt, task)
         path = login_relay.endpoint_path(attempt.id)
         assert path is not None
+        assert (await _ask(attempt.id)).delivery == "answered"
 
         def refused(_profile: object) -> Path:
             raise ProfileRootRefusedError("not claimed")
@@ -294,6 +295,87 @@ class TestEndpoints:
         assert (await asking).delivery == "lost"
         path = login_relay.endpoint_path(attempt.id)
         assert path is not None and not path.exists()
+        task.cancel()
+
+    async def test_stop_login_ends_a_reply_its_reader_stopped_reading(
+        self, short_root: Path
+    ):
+        answered = asyncio.Event()
+
+        async def largest_frame(
+            _operation: str, _arguments: Mapping[str, object]
+        ) -> Envelope:
+            answered.set()
+            return Envelope(False, "{}", image="A" * MAX_IMAGE_BASE64)
+
+        login_relay.reset_for_testing()
+        login_relay.install(largest_frame, status_tail_s=lambda: 30)
+        attempt, task = _attempt_with(_forever)
+        login_relay.serve(attempt, task)
+        path = login_relay.endpoint_path(attempt.id)
+        assert path is not None
+        # Connected, and never reads the reply.
+        _reader, writer = await asyncio.open_unix_connection(str(path))
+        await login_relay.write_message(
+            writer, {"tool": "login_view_frame", "arguments": {}}
+        )
+        await asyncio.wait_for(answered.wait(), 3)
+        await asyncio.sleep(0.2)
+
+        await asyncio.wait_for(bootstrap.stop_login(), 3)
+
+        assert not path.exists()
+        writer.close()
+        task.cancel()
+
+    async def test_a_send_the_owner_never_reads_ends_at_the_deadline(
+        self, short_root: Path
+    ):
+        attempt = LoginAttempt()
+        path = login_relay.endpoint_path(attempt.id)
+        assert path is not None
+        path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+
+        async def never_reads(
+            _reader: asyncio.StreamReader, _writer: asyncio.StreamWriter
+        ) -> None:
+            await asyncio.Event().wait()
+
+        stuck = await asyncio.start_unix_server(never_reads, path=str(path))
+        try:
+            sent = await asyncio.wait_for(
+                login_relay.forward(
+                    "login_view_input",
+                    {"events": "x" * 900_000},
+                    attempt.id,
+                    deadline_s=0.5,
+                ),
+                2,
+            )
+        finally:
+            stuck.close()
+
+        assert sent.delivery == "lost"
+
+    async def test_an_answer_is_returned_when_closing_its_stream_stalls(
+        self, short_root: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        attempt, task = _attempt_with(_forever)
+        login_relay.serve(attempt, task)
+
+        async def held(_writer: asyncio.StreamWriter) -> None:
+            await asyncio.Event().wait()
+
+        monkeypatch.setattr(asyncio.StreamWriter, "wait_closed", held)
+        sent = await asyncio.wait_for(
+            login_relay.forward(
+                "login_view_frame", {"after": "x"}, attempt.id, deadline_s=1
+            ),
+            2,
+        )
+
+        assert sent.delivery == "answered" and sent.envelope is not None
+        assert json.loads(sent.envelope.text)["after"] == "x"
         task.cancel()
 
     async def test_a_request_for_another_tool_gets_no_answer(self, short_root: Path):
@@ -616,6 +698,28 @@ class TestTwoServers:
         assert here is not None
         assert len(_images(await _until(owner, here, "image"))) == 1
         assert nothing is None and _reply(elsewhere) == {"access": "unavailable"}
+
+    async def test_a_relay_that_fails_to_start_is_unavailable_at_once(
+        self,
+        owner: Client,
+        other: Client,
+        login: StandInLogin,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        async def fails(*_args: object, **_kwargs: object) -> asyncio.Server:
+            raise OSError("no server")
+
+        monkeypatch.setattr(asyncio, "start_unix_server", fails)
+        shown = await _open_shown(owner)
+
+        elsewhere, nothing = await asyncio.wait_for(_attach(other, shown), 3)
+        _, here = await _attach(owner, shown)
+
+        assert nothing is None and _reply(elsewhere) == {"access": "unavailable"}
+        path = login_relay.endpoint_path(shown["attempt_id"])
+        assert path is not None and not path.exists()
+        assert here is not None
+        assert len(_images(await _until(owner, here, "image"))) == 1
 
 
 async def _relayed_view_from(other: Client, shown: dict[str, str]) -> dict[str, str]:

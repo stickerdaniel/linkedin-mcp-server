@@ -50,6 +50,7 @@ logger = logging.getLogger(__name__)
 
 MAX_MESSAGE_BYTES = 1024 * 1024
 CONNECT_TIMEOUT_S = 5.0
+CLOSE_TIMEOUT_S = 1.0
 ENDPOINT_DIR = "login-view"
 
 Operation = Literal["login_view_attach", "login_view_frame", "login_view_input"]
@@ -182,6 +183,16 @@ async def write_message(
     await writer.drain()
 
 
+async def _close_stream(writer: asyncio.StreamWriter, timeout_s: float) -> None:
+    """Close *writer*, and abort it when the peer holds the close past *timeout_s*."""
+    writer.close()
+    with contextlib.suppress(Exception):
+        try:
+            await asyncio.wait_for(writer.wait_closed(), timeout_s)
+        except TimeoutError:
+            writer.transport.abort()
+
+
 def endpoint_path(attempt_id: str) -> Path | None:
     """Where the owner of *attempt_id* listens, or ``None`` when there is no relay.
 
@@ -207,12 +218,18 @@ class _Endpoint:
     sock: socket.socket
     started: asyncio.Task[None] | None = None
     server: asyncio.Server | None = None
-    accepted: set[asyncio.Task[Any]] = field(default_factory=set)
+    accepted: dict[asyncio.Task[Any], asyncio.StreamWriter] = field(
+        default_factory=dict
+    )
     timer: asyncio.TimerHandle | None = None
     closed: bool = False
 
-    async def close(self) -> None:
-        """Stop listening, end accepted requests, remove the socket if it is ours."""
+    def close(self) -> None:
+        """Stop listening, abort accepted requests, remove the socket if it is ours.
+
+        Synchronous, so neither a peer that stops reading nor a cancelled
+        caller can hold or skip any of it.
+        """
         if self.closed:
             return
         self.closed = True
@@ -223,9 +240,9 @@ class _Endpoint:
         if self.server is not None:
             self.server.close()
         self.sock.close()
-        for task in list(self.accepted):
+        for task, writer in self.accepted.items():
+            writer.transport.abort()
             task.cancel()
-        await asyncio.gather(*self.accepted, return_exceptions=True)
         _remove_if_ours(self.path, self.identity)
 
 
@@ -330,35 +347,53 @@ async def _start(endpoint: _Endpoint) -> None:
         await _answer(endpoint, reader, writer)
 
     try:
-        endpoint.server = await asyncio.start_unix_server(accepted, sock=endpoint.sock)
+        # Nothing suspends before the server is recorded, so a close that runs
+        # while it starts also stops the listener.
+        if sys.version_info >= (3, 13):
+            # Its own cleanup would unlink the path without the claim check.
+            endpoint.server = await asyncio.start_unix_server(
+                accepted, sock=endpoint.sock, start_serving=False, cleanup_socket=False
+            )
+        else:
+            endpoint.server = await asyncio.start_unix_server(
+                accepted, sock=endpoint.sock, start_serving=False
+            )
+        await endpoint.server.start_serving()
     except Exception:
         logger.warning("The sign-in view relay did not start", exc_info=True)
+        # Bound but not served, the socket would hold a sibling's call until
+        # its deadline instead of refusing it.
+        _close(endpoint)
 
 
 def _retire_after_tail(endpoint: _Endpoint) -> None:
     if endpoint.closed:
         return
     loop = asyncio.get_running_loop()
-
-    def retire() -> None:
-        loop.create_task(_close(endpoint), name="linkedin-login-view-relay-retire")
-
-    endpoint.timer = loop.call_later(max(_relay.status_tail_s(), 0.0), retire)
+    endpoint.timer = loop.call_later(max(_relay.status_tail_s(), 0.0), _close, endpoint)
 
 
-async def _close(endpoint: _Endpoint) -> None:
+def _close(endpoint: _Endpoint) -> None:
     if _relay.endpoints.get(endpoint.attempt_id) is endpoint:
         del _relay.endpoints[endpoint.attempt_id]
     try:
-        await endpoint.close()
+        endpoint.close()
     except Exception:
         logger.warning("The sign-in view relay did not close cleanly", exc_info=True)
 
 
 async def close_all() -> None:
-    """Close every endpoint of this process, retained status tails included."""
+    """Close every endpoint of this process, retained status tails included.
+
+    Every endpoint is closed before the first await; the aborted requests then
+    get :data:`CLOSE_TIMEOUT_S` to finish.
+    """
     endpoints = list(_relay.endpoints.values())
-    await asyncio.gather(*(_close(endpoint) for endpoint in endpoints))
+    for endpoint in endpoints:
+        _close(endpoint)
+    handlers = [task for endpoint in endpoints for task in endpoint.accepted]
+    if handlers:
+        await asyncio.wait(handlers, timeout=CLOSE_TIMEOUT_S)
 
 
 def _remove_if_ours(
@@ -385,7 +420,7 @@ async def _answer(
     """Answer one request with the local operation, exactly once."""
     task = asyncio.current_task()
     if task is not None:
-        endpoint.accepted.add(task)
+        endpoint.accepted[task] = writer
     try:
         request = await asyncio.wait_for(read_message(reader), CONNECT_TIMEOUT_S)
         operation, arguments = _request(request)
@@ -403,10 +438,8 @@ async def _answer(
         logger.debug("A relay request ended without an answer: %s", type(exc).__name__)
     finally:
         if task is not None:
-            endpoint.accepted.discard(task)
-        writer.close()
-        with contextlib.suppress(Exception):
-            await writer.wait_closed()
+            endpoint.accepted.pop(task, None)
+        await _close_stream(writer, CLOSE_TIMEOUT_S)
 
 
 async def _write_reply(writer: asyncio.StreamWriter, envelope: Envelope) -> None:
@@ -461,14 +494,16 @@ async def forward(
     except (OSError, TimeoutError):
         return Forwarded("unavailable")
     try:
-        await write_message(writer, {"tool": operation, "arguments": dict(arguments)})
-        reply = await asyncio.wait_for(
-            read_message(reader), max(deadline - loop.time(), 0.0)
-        )
+        # One deadline for the whole hop: an owner that stops reading holds
+        # the send as surely as one that never answers.
+        async with asyncio.timeout_at(deadline):
+            await write_message(
+                writer, {"tool": operation, "arguments": dict(arguments)}
+            )
+            reply = await read_message(reader)
         return Forwarded("answered", Envelope.from_wire(reply))
     except (OSError, TimeoutError, EOFError, RelayProtocolError):
         return Forwarded("lost")
     finally:
-        writer.close()
-        with contextlib.suppress(Exception):
-            await writer.wait_closed()
+        remaining = max(deadline - loop.time(), 0.0)
+        await _close_stream(writer, min(CLOSE_TIMEOUT_S, remaining))
