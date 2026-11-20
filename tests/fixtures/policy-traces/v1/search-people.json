@@ -88,7 +88,9 @@
       "call": "search_people",
       "kind": "boundary.scroll_body",
       "max_scrolls": 5,
-      "pause_time": 0.5
+      "pause_time": 0.5,
+      "poll_interval": 0.25,
+      "settle_timeout": 2.0
     },
     {
       "arg": {

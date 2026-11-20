@@ -1,5 +1,6 @@
 """Tests for core utility functions (rate-limit detection, scrolling, modals)."""
 
+from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -9,7 +10,11 @@ from linkedin_mcp_server.core.exceptions import (
     AuthenticationError,
     RateLimitError,
 )
-from linkedin_mcp_server.core.utils import detect_rate_limit, scroll_job_sidebar
+from linkedin_mcp_server.core.utils import (
+    detect_rate_limit,
+    scroll_job_sidebar,
+    scroll_to_bottom,
+)
 
 
 @pytest.fixture
@@ -189,3 +194,90 @@ class TestScrollDeadline:
                 await scroll_job_sidebar(page)
 
         holder.dispose.assert_awaited_once()
+
+
+class _LazyListPage:
+    """A page whose list grows by one batch a fixed delay after each scroll.
+
+    Only a scroll requests the next batch, and the batch lands ``delay``
+    seconds later, so a scroll loop that gives up before the batch arrives
+    reads a page that stopped growing while entries were still pending.
+    """
+
+    def __init__(self, batches: int, delay: float, batch_height: int = 100):
+        self.height = 1000
+        self.batches_left = batches
+        self.delay = delay
+        self.batch_height = batch_height
+        self.scrolls = 0
+        self._lands_at: float | None = None
+
+    async def evaluate(self, expression: str) -> int | None:
+        import time
+
+        now = time.monotonic()
+        if self._lands_at is not None and now >= self._lands_at:
+            self.height += self.batch_height
+            self.batches_left -= 1
+            self._lands_at = None
+        if "scrollTo" in expression:
+            self.scrolls += 1
+            if self.batches_left > 0 and self._lands_at is None:
+                self._lands_at = now + self.delay
+            return None
+        return self.height
+
+
+class TestScrollToBottom:
+    """A quiet round is not the bottom of a lazy list (#1464)."""
+
+    async def test_a_batch_slower_than_the_pause_is_still_loaded(self):
+        """Each batch arrives after the pause has elapsed.
+
+        Stopping on the first round whose height did not change returns only
+        what rendered first, which is how detail sections came back truncated.
+        """
+        page = _LazyListPage(batches=3, delay=0.12)
+
+        await scroll_to_bottom(
+            cast(Any, page),
+            pause_time=0.02,
+            max_scrolls=10,
+            settle_timeout=0.5,
+            poll_interval=0.01,
+        )
+
+        assert page.batches_left == 0
+        assert page.height == 1300
+
+    async def test_a_page_that_never_grows_stops_after_one_settle(self):
+        """The extra wait is paid once, on the round that ends the scroll."""
+        import time
+
+        page = _LazyListPage(batches=0, delay=0.0)
+
+        started = time.monotonic()
+        await scroll_to_bottom(
+            cast(Any, page),
+            pause_time=0.01,
+            max_scrolls=10,
+            settle_timeout=0.1,
+            poll_interval=0.01,
+        )
+        elapsed = time.monotonic() - started
+
+        assert page.scrolls == 1
+        assert elapsed < 0.5
+
+    async def test_max_scrolls_still_bounds_an_endless_list(self):
+        page = _LazyListPage(batches=1000, delay=0.0)
+
+        await scroll_to_bottom(
+            cast(Any, page),
+            pause_time=0.0,
+            max_scrolls=4,
+            settle_timeout=0.05,
+            poll_interval=0.01,
+        )
+
+        assert page.scrolls == 4
