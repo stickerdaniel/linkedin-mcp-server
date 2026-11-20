@@ -2002,7 +2002,7 @@ class TestALogoutFencesAnOpenLogin:
                 subprocess.run(
                     [sys.executable, "-m", "linkedin_mcp_server", "--logout"],
                     capture_output=True,
-                    text=True,
+                    encoding="utf-8",
                     timeout=120,
                     env={
                         **os.environ,
