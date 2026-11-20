@@ -24,6 +24,7 @@ from linkedin_mcp_server.login_attempt import (
 )
 from linkedin_mcp_server.private_state import PrivateStateError
 from linkedin_mcp_server.session_state import (
+    advance_logout_epoch,
     clear_auth_state,
     load_source_state,
     portable_cookie_path,
@@ -369,6 +370,52 @@ class TestSweep:
         assert _entries(root) == sorted(
             [pending.directory.name, pending.lock_path.name]
         )
+
+
+class TestLogout:
+    def test_logout_removes_abandoned_attempts_and_keeps_a_held_one(
+        self, isolate_profile_dir
+    ):
+        _write_session(isolate_profile_dir)
+        root = attempts_root(isolate_profile_dir)
+        root.mkdir()
+        abandoned = _abandon(root)
+        (root / abandoned / "cookies.json").write_text('["li_at"]')
+        held = _abandon(root)
+        holder = _hold_lock(root / f"{held}.lock")
+        try:
+            assert clear_auth_state(isolate_profile_dir)
+            assert _entries(root) == sorted([held, f"{held}.lock"])
+        finally:
+            assert holder.stdin is not None
+            holder.stdin.close()
+            holder.wait(timeout=30)
+
+    def test_logout_with_no_stored_session_still_removes_abandoned_attempts(
+        self, isolate_profile_dir
+    ):
+        root = attempts_root(isolate_profile_dir)
+        root.mkdir()
+        abandoned = _abandon(root)
+        (root / abandoned / "cookies.json").write_text('["li_at"]')
+
+        assert advance_logout_epoch(isolate_profile_dir, expect_empty=True)
+
+        assert _entries(root) == []
+
+    @_POSIX_ONLY
+    def test_logout_does_not_follow_a_linked_attempts_directory(
+        self, isolate_profile_dir, tmp_path
+    ):
+        _write_session(isolate_profile_dir)
+        target = tmp_path / "elsewhere"
+        target.mkdir()
+        _abandon(target)
+        attempts_root(isolate_profile_dir).symlink_to(target)
+
+        clear_auth_state(isolate_profile_dir)
+
+        assert len(_entries(target)) == 2
 
 
 class TestEndStates:

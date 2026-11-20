@@ -213,6 +213,18 @@ def sweep(root: Path) -> None:
         _dispose_lock(lock_path, fd)
 
 
+def sweep_abandoned(source_profile_dir: Path) -> None:
+    """Remove abandoned attempts of *source_profile_dir*, as a logout does.
+
+    Only a real ``login-attempts`` directory is swept: a planted link there
+    would lead the deletion somewhere else. Attempts still held are left to
+    their owners, which discard them once their browser has closed.
+    """
+    root = attempts_root(source_profile_dir)
+    if _is_plain_directory(root):
+        sweep(root)
+
+
 def open_pending_login(source_profile_dir: Path) -> PendingLogin:
     """Create a new attempt for *source_profile_dir*, its lock and its guardian.
 

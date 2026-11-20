@@ -1326,6 +1326,18 @@ def _write_logout_epoch(profile_dir: Path) -> None:
     secure_write_text(logout_epoch_path(profile_dir), f"{uuid4()}\n")
 
 
+def _sweep_login_attempts(profile_dir: Path) -> bool:
+    """Remove abandoned login attempts, whose directories hold cookies too."""
+    from linkedin_mcp_server.login_attempt import sweep_abandoned
+
+    try:
+        sweep_abandoned(profile_dir)
+    except OSError as exc:
+        logger.warning("Could not clear abandoned login attempts: %s", exc)
+        return False
+    return True
+
+
 def advance_logout_epoch(
     source_profile_dir: Path | None = None,
     *,
@@ -1359,6 +1371,7 @@ def advance_logout_epoch(
         if expect_empty and _source_session_present(profile_dir):
             return False
         _write_logout_epoch(profile_dir)
+        _sweep_login_attempts(profile_dir)
         return True
     finally:
         lease.release()
@@ -1433,7 +1446,7 @@ def clear_auth_state(
                 logger.warning("Could not clear auth artifact %s: %s", target, exc)
                 success = False
         _write_logout_epoch(profile_dir)
-        return success
+        return _sweep_login_attempts(profile_dir) and success
 
 
 def reset_source_profile(source_profile_dir: Path | None = None) -> None:
