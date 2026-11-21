@@ -2,12 +2,12 @@
 
 Claude Desktop runs one stdio server entry as two server processes: the
 model's ``open_login`` lands in one, the app's ``login_view_attach``,
-``login_view_frame``, ``login_view_input`` and ``login_view_release`` may land
-in the other. Both share only the auth root. So every process that runs a
-``LoginAttempt`` serves those four operations for it on a Unix socket in the
-auth root, ``<auth root>/login-view/<attempt id>.sock``, and a process that
-does not know an attempt forwards the call there and returns the owner's
-result as it came.
+``login_view_frame`` and ``login_view_input`` may land in the other. Both
+share only the auth root. So every process that runs a ``LoginAttempt``
+serves those three operations for it on a Unix socket in the auth root,
+``<auth root>/login-view/<attempt id>.sock``, and a process that does not
+know an attempt forwards the call there and returns the owner's result as it
+came.
 
 The owner enforces everything: grants, opens, page ids and input rules run
 once, in the process that holds the attempt. This module only moves bytes:
@@ -17,7 +17,7 @@ way, at most :data:`MAX_MESSAGE_BYTES`. The decoding rules follow
 an object body, the length refused before the body is read.
 
 Trust: the socket lives in the auth root next to the session cookies, mode
-0600 in a 0700 directory, and accepts only the four view operations. Anything
+0600 in a 0700 directory, and accepts only the three view operations. Anything
 that can connect could already read the session there.
 
 The relay needs asyncio's Unix sockets (Linux, macOS; Docker is Linux) and a
@@ -54,14 +54,11 @@ CONNECT_TIMEOUT_S = 5.0
 CLOSE_TIMEOUT_S = 1.0
 ENDPOINT_DIR = "login-view"
 
-Operation = Literal[
-    "login_view_attach", "login_view_frame", "login_view_input", "login_view_release"
-]
+Operation = Literal["login_view_attach", "login_view_frame", "login_view_input"]
 _OPERATIONS: dict[str, Operation] = {
     "login_view_attach": "login_view_attach",
     "login_view_frame": "login_view_frame",
     "login_view_input": "login_view_input",
-    "login_view_release": "login_view_release",
 }
 
 _HEADER = struct.Struct("!I")

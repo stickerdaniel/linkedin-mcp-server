@@ -68,8 +68,6 @@ const RETRY_MS = 1000;
 // Transport failures of an attach are retried this often, with growing waits.
 const ATTACH_RETRIES = 3;
 const ATTACH_BACKOFF_MS = 500;
-// The attach tool's own timeout, the longest the way out waits for its grant.
-const ATTACH_WAIT_MS = 10000;
 const MAC = /mac|iphone|ipad/i.test(navigator.userAgentData?.platform || navigator.platform || '');
 const NAMED_KEYS = new Set(['Enter', 'Tab', 'Backspace', 'Delete', 'Escape', 'ArrowUp',
   'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Home', 'End', 'PageUp', 'PageDown']);
@@ -94,10 +92,6 @@ const REFUSALS = {
   unavailable: UNAVAILABLE,
 };
 const GUIDE = 'https://github.com/stickerdaniel/linkedin-mcp-server#sign-in-outside-the-chat';
-const RELEASED = 'Continue in your browser, then ask for your LinkedIn data again.';
-// The login may still hold the browser profile, which the outside sign-in then
-// reports as busy until the chat app quits and stops its server.
-const MAYBE_HELD = 'Continue in your browser. If it reports a busy browser, quit this chat app once.';
 const ATTACH_ENDINGS = {
   replaced: 'A newer sign-in view replaced this one.',
   none: 'This sign-in is no longer available. Ask for the LinkedIn sign-in again.',
@@ -131,16 +125,21 @@ let pageId = null;
 let geometry = null;
 const queue = [];
 let sending = false;
-let leaving = false;
+// Set once a host that cannot open links was asked for the guide.
+let guided = false;
+let lastStatus = { tone: '', message: text.textContent };
 
 // The way out of the chat stays one click away in every state but a finished
 // sign-in, because the page view cannot show everything a sign-in may need,
-// such as a native browser dialog.
+// such as a native browser dialog. Once asked for, the guide's address stays
+// in every status until the sign-in finishes.
 function show(tone, message) {
+  const finished = tone.includes('success');
+  lastStatus = { tone, message };
   document.body.className = tone;
-  text.textContent = message;
+  text.textContent = guided && !finished ? `${message} Guide: ${GUIDE}` : message;
   hint.hidden = tone !== 'live';
-  outside.hidden = tone.includes('success');
+  outside.hidden = finished;
 }
 
 function forgetBinding() {
@@ -160,42 +159,19 @@ function end(tone, message) {
   show(`ended ${tone}`, message);
 }
 
-// Ends this view's login first, so the sign-in outside the chat finds the
-// browser profile free, then opens the guide in the user's browser.
+// Opens the guide to signing in from the user's browser and leaves this view
+// as it is: the login here keeps running, and a sign-in elsewhere ends it,
+// which the next frame reports. The host shows its own dialog with the
+// address, and a cancel there is the user's answer.
 async function signInOutside() {
-  if (leaving) return;
-  leaving = true;
-  const asked = binding;
-  if (asked && !grant && !ended && attaching?.binding === asked) {
-    await Promise.race([attaching.done, sleep(ATTACH_WAIT_MS)]);
-    if (tornDown) return;
-  }
-  // Only the grant of the binding shown at the click ends a login.
-  const held = grant && !ended && binding === asked ? { grant, attempt_id: attemptId } : null;
-  end('waiting', held ? 'Ending the sign-in in the chat.' : MAYBE_HELD);
-  let release = null;
-  if (held) {
-    try {
-      const result = await app.callServerTool({ name: 'login_view_release', arguments: held });
-      release = result.isError ? null : JSON.parse(textOf(result)).release;
-    } catch {
-      release = null;
-    }
-    if (tornDown) return;
-  }
-  const message = release === 'released' ? RELEASED : MAYBE_HELD;
   if (app.getHostCapabilities()?.openLinks) {
-    // The host shows its own dialog with the address; a cancel there is the
-    // user's answer, and the button stays for another try.
     try {
       await app.openLink({ url: GUIDE });
     } catch {}
-    if (tornDown) return;
-    end('info', message);
-  } else {
-    end('info', `${message} Guide: ${GUIDE}`);
+    return;
   }
-  leaving = false;
+  guided = true;
+  show(lastStatus.tone, lastStatus.message);
 }
 
 outside.addEventListener('click', signInOutside);

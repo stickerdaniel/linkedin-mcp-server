@@ -446,7 +446,6 @@ class TestServerRoles:
             "login_view_attach",
             "login_view_frame",
             "login_view_input",
-            "login_view_release",
         }
         assert direct - owner == (view if install == "docker" else set())
         assert owner <= direct

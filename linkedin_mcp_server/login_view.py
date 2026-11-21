@@ -38,7 +38,7 @@ logger = logging.getLogger(__name__)
 #: nothing else, so the browser serialization and the update notice leave them
 #: out; one spelling here keeps those exemptions and the registration in step.
 LOGIN_VIEW_TOOLS = frozenset(
-    {"login_view_attach", "login_view_frame", "login_view_input", "login_view_release"}
+    {"login_view_attach", "login_view_frame", "login_view_input"}
 )
 
 Outcome = Literal["signed_in", "restricted", "failed", "cancelled", "repaired_by_peer"]
@@ -480,9 +480,15 @@ class LoginAttempt:
         if task.cancelled():
             self.outcome = "cancelled"
         elif (error := task.exception()) is None:
-            # A login that never opened a browser and still succeeded found
-            # another client's fresh session in place.
-            self.outcome = "signed_in" if self._opened_a_browser else "repaired_by_peer"
+            # A success counts only once a session is stored. A login that
+            # never opened a browser and still succeeded found another
+            # client's fresh session in place.
+            if not _session_stored():
+                self.outcome = "failed"
+            else:
+                self.outcome = (
+                    "signed_in" if self._opened_a_browser else "repaired_by_peer"
+                )
         else:
             from linkedin_mcp_server.core.exceptions import AccountRestrictedError
             from linkedin_mcp_server.core.proxy_errors import redact_proxy_credentials
@@ -517,6 +523,15 @@ async def published(browser: LoginBrowser) -> AsyncGenerator[None]:
         yield
     finally:
         attempt._hide()
+
+
+def _session_stored() -> bool:
+    from linkedin_mcp_server.bootstrap import _auth_ready
+
+    try:
+        return _auth_ready()
+    except UnicodeDecodeError:
+        return False
 
 
 async def _screenshot(page: Page, quality: int, timeout_s: float) -> bytes:

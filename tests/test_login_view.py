@@ -17,6 +17,7 @@ from typing import Any, cast
 import pytest
 from patchright.async_api import Error as PlaywrightError
 from patchright.async_api import async_playwright
+from test_bootstrap import _make_auth_ready
 
 from linkedin_mcp_server import login_view
 from linkedin_mcp_server.login_view import (
@@ -27,6 +28,7 @@ from linkedin_mcp_server.login_view import (
     Paste,
     TypeText,
 )
+from linkedin_mcp_server.session_state import source_state_path
 
 ORIGIN = "https://login.invalid"
 
@@ -443,7 +445,9 @@ class TestInput:
 
 
 class TestAttempt:
-    async def test_the_attempt_settles_from_the_task_result(self):
+    async def test_the_attempt_settles_from_the_task_result(
+        self, isolate_profile_dir: Path
+    ):
         async def fails() -> None:
             raise RuntimeError("the login browser could not start")
 
@@ -453,6 +457,7 @@ class TestAttempt:
         async def never() -> None:
             await asyncio.Event().wait()
 
+        _make_auth_ready(isolate_profile_dir)
         failed, peer, cancelled = LoginAttempt(), LoginAttempt(), LoginAttempt()
         tasks = [
             failed.start(fails(), name="t1"),
@@ -470,7 +475,30 @@ class TestAttempt:
         assert peer.state == "repaired_by_peer"
         assert cancelled.state == "cancelled"
 
-    async def test_a_login_publishes_its_browser_only_while_it_holds_it(self):
+    @pytest.mark.parametrize("stored", ["nothing", "undecodable state"])
+    async def test_a_login_that_returns_without_a_stored_session_failed(
+        self, isolate_profile_dir: Path, stored: str
+    ):
+        if stored == "undecodable state":
+            _make_auth_ready(isolate_profile_dir)
+            source_state_path(isolate_profile_dir).write_bytes(b"\xff")
+        page, context = FakePage(), FakeContext()
+        browser = SimpleNamespace(page=page, context=context)
+
+        async def login() -> None:
+            async with login_view.published(cast(Any, browser)):
+                pass
+
+        opened, peer = LoginAttempt(), LoginAttempt()
+        await opened.start(login(), name="opened")
+        await peer.start(asyncio.sleep(0), name="peer")
+
+        assert opened.state == "failed"
+        assert peer.state == "failed"
+
+    async def test_a_login_publishes_its_browser_only_while_it_holds_it(
+        self, isolate_profile_dir: Path
+    ):
         page, context = FakePage(), FakeContext()
         browser = SimpleNamespace(page=page, context=context)
         inside = asyncio.Event()
@@ -486,6 +514,7 @@ class TestAttempt:
         await inside.wait()
         assert attempt.view is not None and attempt.state == "signing_in"
 
+        _make_auth_ready(isolate_profile_dir)
         leave.set()
         await task
 
@@ -522,10 +551,7 @@ async def test_the_login_closes_the_view_before_its_browser_tears_down(
 
     async def login() -> None:
         await setup._run_login(
-            cast(setup.BrowserManager, Manager()),
-            tmp_path / "profile",
-            SimpleNamespace(),
-            0,
+            cast(setup.BrowserManager, Manager()), tmp_path / "profile", 0
         )
 
     task = attempt.start(login(), name="login")

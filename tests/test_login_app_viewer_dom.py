@@ -53,11 +53,8 @@ globalThis.linkedinLoginSdk = { App };
 """
 
 GUIDE = "https://github.com/stickerdaniel/linkedin-mcp-server#sign-in-outside-the-chat"
-RELEASED = "Continue in your browser, then ask for your LinkedIn data again."
 MAYBE_SENT = "That input may not have reached the page; check it before typing again."
-MAYBE_HELD = (
-    "Continue in your browser. If it reports a busy browser, quit this chat app once."
-)
+SIGNED_IN = "Signed in to LinkedIn. You can close this."
 
 
 def shown(open_id: str = "O1", attempt_id: str = "A1") -> dict[str, Any]:
@@ -668,7 +665,6 @@ async def test_escape_twice_leaves_the_page_for_the_way_out(viewer: Any):
         {"type": "key", "key": "Escape", "modifiers": []},
         {"type": "type", "text": "z"},
     ]
-    assert await calls(viewer, "login_view_release") == []
 
 
 async def test_one_escape_and_tab_still_reach_the_page(viewer: Any):
@@ -743,222 +739,74 @@ async def test_the_paste_hint_names_the_platforms_shortcut(
     assert await viewer.locator("#hint").inner_text() == hint
 
 
-@pytest.mark.parametrize(
-    ("release", "message"),
-    [
-        ({"access": "full", "release": "released"}, RELEASED),
-        ({"access": "full", "release": "ending"}, MAYBE_HELD),
-        ({"access": "full", "release": "held"}, MAYBE_HELD),
-        ({"release": "unknown"}, MAYBE_HELD),
-        ({"access": "expired"}, MAYBE_HELD),
-    ],
-    ids=["released", "ending", "held", "unknown", "refused"],
-)
-async def test_the_button_ends_the_login_here_then_opens_the_guide(
-    viewer: Any, release: dict[str, str], message: str
-):
-    await live(viewer)
+UNCHANGED = frame(access="full", state="signing_in", frame="unchanged")
 
-    await viewer.click("#outside")
-    await wait_for_calls(viewer, "login_view_release", 1)
-    await viewer.wait_for_timeout(150)
-    assert await links(viewer) == []
-    await answer(viewer, "login_view_release", 0, frame(**release))
-    await viewer.wait_for_function("bridge.links.length === 1")
-    await answer_link(viewer, 0, {})
-    await wait_for_text(viewer, message)
 
-    assert await calls(viewer, "login_view_release") == [
-        {"grant": "G1", "attempt_id": "A1"}
+async def still_live(page: Any, polled: int) -> None:
+    """The image shows, the poll after *polled* goes out, and typing reaches the page."""
+    await answer(page, "login_view_frame", polled - 1, UNCHANGED)
+    await wait_for_calls(page, "login_view_frame", polled + 1)
+    assert await page.locator("#screen").is_visible()
+    await page.focus("#screen")
+    await page.keyboard.type("x")
+    await wait_for_calls(page, "login_view_input", 1)
+    assert (await calls(page, "login_view_input"))[0]["events"] == [
+        {"type": "type", "text": "x"}
     ]
-    assert await links(viewer) == [GUIDE]
-    assert await viewer.locator("#screen").is_hidden()
-    assert await viewer.locator("#outside").is_visible()
 
 
-async def test_a_view_without_its_grant_only_opens_the_guide(viewer: Any):
+@pytest.mark.parametrize("host", ["opened", "error result", "rejected"])
+async def test_the_button_opens_the_guide_and_the_view_stays_live(
+    viewer: Any, host: str
+):
     await live(viewer)
     await wait_for_calls(viewer, "login_view_frame", 2)
-    await answer(viewer, "login_view_frame", 1, frame(access="expired"))
-    await viewer.wait_for_function(
-        "document.getElementById('text').textContent.includes('expired')"
-    )
 
     await viewer.click("#outside")
     await viewer.wait_for_function("bridge.links.length === 1")
-    await answer_link(viewer, 0, {})
-    await wait_for_text(viewer, MAYBE_HELD)
-
-    assert await calls(viewer, "login_view_release") == []
-
-
-async def test_teardown_during_the_attach_wait_opens_no_link(viewer: Any):
-    await connect(viewer)
-    await deliver(viewer, shown(open_id="O2", attempt_id="A2"))
-    await wait_for_calls(viewer, "login_view_attach", 1)
-
-    await viewer.click("#outside")
-    await viewer.evaluate("bridge.onteardown({}, {})", isolated_context=False)
-    await answer(
-        viewer,
-        "login_view_attach",
-        0,
-        attached(grant="G2", open_id="O2", attempt_id="A2"),
-    )
-    await viewer.wait_for_timeout(300)
-
-    assert await calls(viewer, "login_view_release") == []
-    assert await links(viewer) == []
-
-
-async def test_teardown_during_the_release_opens_no_link(viewer: Any):
-    await live(viewer)
-
-    await viewer.click("#outside")
-    await wait_for_calls(viewer, "login_view_release", 1)
-    await viewer.evaluate("bridge.onteardown({}, {})", isolated_context=False)
-    await answer(
-        viewer, "login_view_release", 0, frame(access="full", release="released")
-    )
-    await viewer.wait_for_timeout(300)
-
-    assert await links(viewer) == []
-
-
-async def test_a_narrow_card_keeps_the_message_readable_and_the_button_close(
-    viewer: Any,
-):
-    await viewer.set_viewport_size({"width": 300, "height": 800})
-    await live(viewer)
-
-    await viewer.click("#outside")
-    await wait_for_calls(viewer, "login_view_release", 1)
-    await answer(viewer, "login_view_release", 0, frame(access="full", release="held"))
-    await viewer.wait_for_function("bridge.links.length === 1")
-    await answer_link(viewer, 0, {"isError": True})
-    await wait_for_text(viewer, MAYBE_HELD)
-
-    status = await viewer.locator("#status").bounding_box()
-    text = await viewer.locator("#text").bounding_box()
-    assert status is not None and text is not None
-    assert text["width"] > 200
-    assert status["height"] < 200
-    assert await viewer.locator("#outside").is_visible()
-
-
-async def test_a_click_before_the_attach_answers_releases_with_its_grant(
-    viewer: Any,
-):
-    await connect(viewer)
-    await deliver(viewer, shown(open_id="O2", attempt_id="A2"))
-    await wait_for_calls(viewer, "login_view_attach", 1)
-
-    await viewer.click("#outside")
-    await viewer.wait_for_timeout(150)
-    assert await calls(viewer, "login_view_release") == []
-    await answer(
-        viewer,
-        "login_view_attach",
-        0,
-        attached(grant="G2", open_id="O2", attempt_id="A2"),
-    )
-    await wait_for_calls(viewer, "login_view_release", 1)
-    await viewer.wait_for_timeout(150)
-    links_before_release = await links(viewer)
-    await answer(
-        viewer, "login_view_release", 0, frame(access="full", release="released")
-    )
-    await viewer.wait_for_function("bridge.links.length === 1")
-    await answer_link(viewer, 0, {})
-    await wait_for_text(viewer, RELEASED)
-
-    assert links_before_release == []
-    assert await calls(viewer, "login_view_release") == [
-        {"grant": "G2", "attempt_id": "A2"}
-    ]
-    assert await links(viewer) == [GUIDE]
-
-
-async def test_a_click_before_an_attach_that_fails_only_opens_the_guide(
-    viewer: Any,
-):
-    await connect(viewer)
-    await show_the_sign_in(viewer)
-    await wait_for_calls(viewer, "login_view_attach", 1)
-
-    await viewer.click("#outside")
-    await fail(viewer, "login_view_attach", 0)
-    await viewer.wait_for_function("bridge.links.length === 1")
-    status_during_link = await viewer.locator("#text").inner_text()
-    await answer_link(viewer, 0, {})
-    await wait_for_text(viewer, MAYBE_HELD)
-    await viewer.wait_for_timeout(700)
-
-    assert status_during_link == MAYBE_HELD
-    assert await calls(viewer, "login_view_release") == []
-    assert await calls(viewer, "login_view_attach") == [
-        {"attempt_id": "A1", "open_id": "O1"}
-    ]
-    assert await links(viewer) == [GUIDE]
-
-
-async def test_a_click_never_releases_a_sign_in_shown_after_it(viewer: Any):
-    await connect(viewer)
-    await show_the_sign_in(viewer)
-    await wait_for_calls(viewer, "login_view_attach", 1)
-
-    await viewer.click("#outside")
-    await deliver(viewer, shown(open_id="O2", attempt_id="A2"))
-    await wait_for_calls(viewer, "login_view_attach", 2)
-    await answer(
-        viewer,
-        "login_view_attach",
-        1,
-        attached(grant="G2", open_id="O2", attempt_id="A2"),
-    )
-    await answer(viewer, "login_view_attach", 0, attached())
-    await viewer.wait_for_function("bridge.links.length === 1")
-    await answer_link(viewer, 0, {})
-    await wait_for_text(viewer, MAYBE_HELD)
-
-    assert await calls(viewer, "login_view_release") == []
-
-
-@pytest.mark.parametrize("failure", ["rejected", "error result"])
-async def test_a_link_the_user_declines_keeps_the_status_short(
-    viewer: Any, failure: str
-):
-    await live(viewer)
-
-    await viewer.click("#outside")
-    await wait_for_calls(viewer, "login_view_release", 1)
-    await answer(
-        viewer, "login_view_release", 0, frame(access="full", release="released")
-    )
-    await viewer.wait_for_function("bridge.links.length === 1")
-    if failure == "rejected":
+    if host == "rejected":
         await viewer.evaluate(
-            "bridge.links[0].reject(new Error('blocked'))", isolated_context=False
+            "bridge.links[0].reject(new Error('cancelled'))", isolated_context=False
         )
     else:
-        await answer_link(viewer, 0, {"isError": True})
-    await wait_for_text(viewer, RELEASED)
+        await answer_link(viewer, 0, {"isError": True} if host != "opened" else {})
 
-    assert GUIDE not in await viewer.locator("#text").inner_text()
+    assert await links(viewer) == [GUIDE]
+    await still_live(viewer, 2)
+    assert await viewer.locator("#text").inner_text() == "Live"
     assert await viewer.locator("#outside").is_visible()
+
+
+async def test_a_sign_in_elsewhere_after_the_click_shows_signed_in(viewer: Any):
+    await live(viewer)
+    await wait_for_calls(viewer, "login_view_frame", 2)
+    await viewer.click("#outside")
+    await viewer.wait_for_function("bridge.links.length === 1")
+    await answer_link(viewer, 0, {})
+
+    await answer(
+        viewer,
+        "login_view_frame",
+        1,
+        frame(access="full", state="repaired_by_peer", frame="none"),
+    )
+    await wait_for_text(viewer, SIGNED_IN)
+
+    assert await viewer.locator("#screen").is_hidden()
+    assert await viewer.locator("#outside").is_hidden()
 
 
 async def test_a_host_that_cannot_open_links_shows_the_guide_to_copy(viewer: Any):
     await live(viewer)
+    await wait_for_calls(viewer, "login_view_frame", 2)
     await viewer.evaluate("bridge.capabilities = {}", isolated_context=False)
 
     await viewer.click("#outside")
-    await wait_for_calls(viewer, "login_view_release", 1)
-    await answer(
-        viewer, "login_view_release", 0, frame(access="full", release="released")
-    )
-    await wait_for_text(viewer, f"{RELEASED} Guide: {GUIDE}")
+    await wait_for_text(viewer, f"Live Guide: {GUIDE}")
+    await still_live(viewer, 2)
 
+    assert await links(viewer) == []
+    assert await viewer.locator("#text").inner_text() == f"Live Guide: {GUIDE}"
     selected = await viewer.evaluate(
         """() => {
             const range = document.createRange();
@@ -972,6 +820,24 @@ async def test_a_host_that_cannot_open_links_shows_the_guide_to_copy(viewer: Any
     assert GUIDE in selected
 
 
+async def test_a_narrow_card_keeps_the_guide_readable_and_the_button_close(
+    viewer: Any,
+):
+    await viewer.set_viewport_size({"width": 300, "height": 800})
+    await live(viewer)
+    await viewer.evaluate("bridge.capabilities = {}", isolated_context=False)
+
+    await viewer.click("#outside")
+    await wait_for_text(viewer, f"Live Guide: {GUIDE}")
+
+    status = await viewer.locator("#status").bounding_box()
+    text = await viewer.locator("#text").bounding_box()
+    assert status is not None and text is not None
+    assert text["width"] > 200
+    assert status["height"] < 200
+    assert await viewer.locator("#outside").is_visible()
+
+
 async def test_a_signed_in_login_leaves_one_line_and_no_image(viewer: Any):
     await live(viewer)
     await wait_for_calls(viewer, "login_view_frame", 2)
@@ -982,9 +848,7 @@ async def test_a_signed_in_login_leaves_one_line_and_no_image(viewer: Any):
         1,
         frame(access="status", state="signed_in", frame="none"),
     )
-    await viewer.wait_for_function(
-        "document.getElementById('text').textContent === 'Signed in to LinkedIn. You can close this.'"
-    )
+    await wait_for_text(viewer, SIGNED_IN)
     await viewer.wait_for_timeout(150)
 
     assert await viewer.locator("#screen").is_hidden()

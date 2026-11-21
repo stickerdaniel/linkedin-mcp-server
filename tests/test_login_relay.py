@@ -34,13 +34,10 @@ from test_login_app import (
     _frame,
     _images,
     _open_shown,
-    _release,
     _reply,
     _text,
     _ui_client,
     _until,
-    free_for_another_process,
-    hold_the_profile,
 )
 from test_server import _stand_in_the_lifespan
 
@@ -423,6 +420,8 @@ class TestEndpoints:
 def login(short_root: Path, monkeypatch: pytest.MonkeyPatch) -> StandInLogin:
     """A Docker server's login on the short root, as in test_login_app."""
     stand_in = StandInLogin(short_root)
+    # One profile for the login, the relay socket and the stored session.
+    monkeypatch.setattr(bootstrap, "get_profile_dir", lambda: short_root)
     _stand_in_the_lifespan(monkeypatch)
     monkeypatch.setenv("LINKEDIN_MCP_RUNTIME", "docker")
     bootstrap.initialize_bootstrap("docker")
@@ -724,100 +723,6 @@ class TestTwoServers:
         assert path is not None and not path.exists()
         assert here is not None
         assert len(_images(await _until(owner, here, "image"))) == 1
-
-    async def test_relayed_release_arguments_are_refused_without_their_values(
-        self, owner: Client, login: StandInLogin
-    ):
-        shown = await _open_shown(owner)
-
-        sent = await login_relay.forward(
-            "login_view_release",
-            {
-                "grant": "SYNTHETIC-GRANT" * 20,
-                "attempt_id": shown["attempt_id"],
-                "extra": "SYNTHETIC-EXTRA",
-            },
-            shown["attempt_id"],
-            deadline_s=3,
-        )
-
-        assert sent.envelope is not None and sent.envelope.is_error
-        assert (sent.envelope.meta or {})["linkedin.dev/error"][
-            "code"
-        ] == "invalid_argument"
-        for secret in ("SYNTHETIC-GRANT", "SYNTHETIC-EXTRA"):
-            assert secret not in sent.envelope.text
-        assert not login.cancelled
-
-
-async def test_a_relayed_release_frees_the_profile_the_owners_login_holds(
-    short_root: Path, monkeypatch: pytest.MonkeyPatch
-):
-    # One profile for the login, the relay socket and the other server's lease.
-    monkeypatch.setattr(bootstrap, "get_profile_dir", lambda: short_root)
-    browser = hold_the_profile(monkeypatch, short_root)
-    async with _ui_client(create_mcp_server()) as owner:
-        async with Client(create_mcp_server()) as other:
-            view = await _relayed_view_from(other, await _open_shown(owner))
-            await asyncio.wait_for(browser.opened.wait(), 10)
-            busy_before = not free_for_another_process(short_root)
-
-            released = await _release(other, view)
-            ended = _reply(await _frame(other, view))
-
-    assert busy_before
-    assert _reply(released) == {"access": "full", "release": "released"}
-    assert ended["access"] == "status" and ended["state"] == "cancelled"
-    assert free_for_another_process(short_root)
-
-
-async def test_a_relayed_release_past_the_wait_answers_ending(
-    short_root: Path, monkeypatch: pytest.MonkeyPatch
-):
-    monkeypatch.setattr(bootstrap, "get_profile_dir", lambda: short_root)
-    monkeypatch.setattr(login_app, "RELEASE_WAIT_S", 0.2)
-    browser = hold_the_profile(monkeypatch, short_root)
-    browser.cleanup.clear()
-    async with _ui_client(create_mcp_server()) as owner:
-        async with Client(create_mcp_server()) as other:
-            view = await _relayed_view_from(other, await _open_shown(owner))
-            await asyncio.wait_for(browser.opened.wait(), 10)
-
-            released = await _release(other, view)
-            browser.cleanup.set()
-            await _until(other, view, "cancelled")
-
-    assert _reply(released) == {"access": "full", "release": "ending"}
-
-
-async def test_a_release_the_owner_never_answered_is_unknown(
-    login: StandInLogin,
-):
-    attempt_id = "ABCDEFGHIJKL"
-    path = login_relay.endpoint_path(attempt_id)
-    assert path is not None
-    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-    accepted = asyncio.Event()
-
-    async def drop_unread(
-        _reader: asyncio.StreamReader, writer: asyncio.StreamWriter
-    ) -> None:
-        accepted.set()
-        writer.transport.abort()
-
-    server = await asyncio.start_unix_server(drop_unread, path=str(path))
-    try:
-        async with Client(create_mcp_server()) as other:
-            result = await other.call_tool_mcp(
-                "login_view_release", {"grant": "g", "attempt_id": attempt_id}
-            )
-    finally:
-        server.close()
-        await server.wait_closed()
-
-    assert accepted.is_set()
-    assert not result.is_error
-    assert _reply(result) == {"release": "unknown"}
 
 
 async def _relayed_view_from(other: Client, shown: dict[str, str]) -> dict[str, str]:
