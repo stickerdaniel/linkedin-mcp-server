@@ -960,6 +960,7 @@ class TestAStoppedRealOwner:
             "start_background_browser_setup_if_needed",
             "watch_for_handoff_requests",
             "stop_background_browser_setup",
+            "stop_login",
         ):
             monkeypatch.setattr(server_module, name, nothing)
         # The temporary directory's file system is not what this is about.

@@ -14,6 +14,7 @@ import mcp.types as mt
 from fastmcp.exceptions import NotFoundError, ToolError, ValidationError
 from fastmcp.server.middleware import CallNext, Middleware, MiddlewareContext
 from fastmcp.tools import ToolResult
+from pydantic import ValidationError as PydanticValidationError
 
 from linkedin_mcp_server.core.proxy_errors import (
     redact_proxy_credentials,
@@ -51,6 +52,7 @@ from linkedin_mcp_server.exceptions import (
     SessionExpiredError,
 )
 from linkedin_mcp_server.core.throttle import throttle_evidence
+from linkedin_mcp_server.login_view import LOGIN_VIEW_TOOLS
 from linkedin_mcp_server.session_state import PeerSessionInPlaceError
 from linkedin_mcp_server.error_diagnostics import (
     build_issue_diagnostics,
@@ -143,6 +145,9 @@ class ErrorCodeMiddleware(Middleware):
     A returned error result passes as it is. One from this server already names
     its code through :func:`error_result`; one forwarded from an older owner may
     not, and its own markers say more than ``internal`` would.
+
+    Invalid arguments to a sign-in view tool are answered without their values:
+    Pydantic quotes each rejected value, and there it is a grant or a password.
     """
 
     async def on_call_tool(
@@ -154,7 +159,32 @@ class ErrorCodeMiddleware(Middleware):
             return await call_next(context)
         except (ToolError, ValidationError, NotFoundError) as exc:
             retry_after = exc.retry_after if isinstance(exc, CodedToolError) else None
-            return error_result(str(exc), _code_of(exc), retry_after=retry_after)
+            message = str(exc)
+            if (
+                isinstance(exc, ValidationError)
+                and context.message.name in LOGIN_VIEW_TOOLS
+            ):
+                message = _value_free(exc)
+            return error_result(message, _code_of(exc), retry_after=retry_after)
+
+
+def _value_free(exc: ValidationError) -> str:
+    """Which fields failed and how, with no value the caller sent."""
+    cause = exc.__cause__
+    if not isinstance(cause, PydanticValidationError):
+        return "Invalid arguments."
+    return value_free_summary(cause)
+
+
+def value_free_summary(cause: PydanticValidationError) -> str:
+    """A Pydantic failure as field names and error kinds, never the values."""
+    problems = [
+        f"{'.'.join(str(part) for part in error['loc']) or 'arguments'}: {error['type']}"
+        for error in cause.errors(
+            include_url=False, include_input=False, include_context=False
+        )
+    ]
+    return "Invalid arguments: " + "; ".join(problems)
 
 
 def _code_of(exc: Exception) -> ErrorCode:

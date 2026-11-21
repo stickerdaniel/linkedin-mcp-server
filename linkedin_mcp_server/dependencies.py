@@ -11,11 +11,13 @@ from fastmcp import Context
 from linkedin_mcp_server.bootstrap import (
     RuntimePolicy,
     current_login_generation,
+    docker_auth_remedy,
     ensure_tool_ready_or_raise,
     get_runtime_policy,
     go_auth_quiescent,
     invalidate_auth_and_trigger_relogin,
     invalidate_browser_setup,
+    record_docker_dead_session,
 )
 from linkedin_mcp_server.core import BrowserManager
 from linkedin_mcp_server.core.exceptions import AuthenticationError, NetworkError
@@ -87,11 +89,12 @@ async def handle_auth_error(
     otherwise, which is the safe direction for a default to point.
     """
     if get_runtime_policy() == RuntimePolicy.DOCKER:
-        raise DockerHostLoginRequiredError(
-            "No valid LinkedIn session is available in Docker. Create one with "
-            "the explicit --login --login-viewer Docker command, or run --login "
-            "on the host, then retry this tool."
-        ) from error
+        # Recorded and nothing else: the browser stays open and the session in
+        # place until `open_login` reads this and retires it through
+        # `restart_dead_docker_login`. The record is what tells it that the
+        # files on disk are this dead session rather than a working one.
+        record_docker_dead_session(current_login_generation())
+        raise DockerHostLoginRequiredError(docker_auth_remedy(ctx)) from error
 
     # Read before the close rather than after it, deliberately, though the
     # ordering is defensive rather than load-bearing today. On the forwarded tool
@@ -163,6 +166,31 @@ async def handle_auth_error(
     await invalidate_auth_and_trigger_relogin(
         ctx, stale_generation=broken_generation
     )  # always raises
+
+
+async def restart_dead_docker_login(
+    ctx: Context | None, generation: str | None
+) -> NoReturn:
+    """Retire the Docker session a tool found dead, and start a login for it.
+
+    The second half of the Docker branch of :func:`handle_auth_error`, which a
+    tool call cannot run because nobody could see the login window. The sign-in
+    view can, so ``open_login`` runs it: the same close confirmation as the
+    managed path, then the generation-guarded relogin, which stands down if
+    *generation* is no longer the one on disk.
+
+    Raises what :func:`invalidate_auth_and_trigger_relogin` raises, or
+    ``BrowserShutdownUnconfirmedError`` when the runtime browser may still hold
+    the profile.
+    """
+    logger.warning("Retiring the dead Docker session for a sign-in in the chat")
+    try:
+        await close_browser()
+    except Exception as close_exc:
+        logger.warning("Failed to close stale browser (ignored): %s", close_exc)
+    if get_profile_lease().browser_open:
+        raise BrowserShutdownUnconfirmedError()
+    await invalidate_auth_and_trigger_relogin(ctx, stale_generation=generation)
 
 
 def tool_errors[**P, R](fn: Callable[P, Awaitable[R]]) -> Callable[P, Awaitable[R]]:

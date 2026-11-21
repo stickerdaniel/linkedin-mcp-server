@@ -108,6 +108,7 @@ Use code <strong>FOUNDING20</strong> for 20% off your first year. <a href="https
 | `search_posts` | Search posts by keyword, optionally filtered by recency or content type. |
 | `get_session_status` | Check your saved login and browser state without opening a browser. |
 | `close_session` | Close the shared browser session without deleting your saved login. |
+| `open_login` | Docker: show the LinkedIn sign-in inside the chat, in clients that show MCP Apps. |
 
 <br/>
 <br/>
@@ -463,13 +464,15 @@ Both run the latest server release. On the first tool call that needs authentica
 
 ### Authentication
 
-Log in once. The container opens a LinkedIn login browser that you drive from your own browser tab.
+Create the session directory first: `mkdir -p ~/.linkedin-mcp` (on Windows, `%USERPROFILE%\.linkedin-mcp`).
+
+**Sign in from the chat.** In Claude Desktop and other clients that show MCP Apps, the LinkedIn sign-in opens inside the chat when a tool needs it. Ctrl+V (Cmd+V on a Mac) pastes.
+
+**Or use the login viewer**, which shows the login browser in your own browser tab.
 
 macOS / Linux:
 
 ```bash
-# Create the directory first so the container can save your session into it
-mkdir -p ~/.linkedin-mcp
 docker run -it --rm \
   -v ~/.linkedin-mcp:/home/pwuser/.linkedin-mcp \
   -p 127.0.0.1:6080:6080 \
@@ -540,7 +543,7 @@ username.
 > `$env:USERPROFILE\.linkedin-mcp` before passing it to Docker.
 
 > [!NOTE]
-> Sessions expire over time. When tool calls start asking for authentication, repeat the login command above, or run `uvx mcp-server-linkedin@latest --login` on the host.
+> Sessions expire over time. When tool calls start asking for authentication, sign in from the chat again, repeat the login viewer command above, or run `uvx mcp-server-linkedin@latest --login` on the host.
 
 ### Setup Help
 
@@ -760,6 +763,19 @@ terminate HTTPS so the token never crosses the network in plain text.
 </details>
 
 </details>
+
+## Sign in outside the chat
+
+Run the login viewer, open the link it prints and sign in:
+
+```bash
+docker run -it --rm \
+  -v ~/.linkedin-mcp:/home/pwuser/.linkedin-mcp \
+  -p 127.0.0.1:6080:6080 \
+  stickerdaniel/linkedin-mcp-server:latest --login --login-viewer
+```
+
+Without Docker: `uvx mcp-server-linkedin@latest --login`.
 
 <br/>
 <br/>

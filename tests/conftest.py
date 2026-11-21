@@ -36,10 +36,12 @@ def reset_singletons():
     from linkedin_mcp_server.logging_config import teardown_trace_logging
     from linkedin_mcp_server.drivers.browser import reset_browser_for_testing
     from linkedin_mcp_server.profile_lease import reset_leases_for_testing
-    from linkedin_mcp_server import remote_catalog, remote_tools
+    from linkedin_mcp_server import login_relay, remote_catalog, remote_tools
     from linkedin_mcp_server.server_role import reset_process_role_for_testing
 
     reset_bootstrap_for_testing()
+    # Relay endpoints are process state like the login they serve.
+    login_relay.reset_for_testing()
     reset_daemon_descriptor_for_testing()
     # The owner's call tracker is process state like the rest. Left standing, a
     # call one test watched is still in flight for the next, which reads as an
@@ -73,6 +75,7 @@ def reset_singletons():
     reset_trace_state_for_testing()
     yield
     reset_bootstrap_for_testing()
+    login_relay.reset_for_testing()
     reset_daemon_descriptor_for_testing()
     reset_browser_for_testing()
     # After the browser, so a lease the browser still held is released by its

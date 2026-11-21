@@ -24,6 +24,7 @@ from linkedin_mcp_server.core import (
     resolve_remember_me_prompt,
     wait_for_manual_login,
 )
+from linkedin_mcp_server import login_view
 from linkedin_mcp_server.core.auth import PeerSignedInError
 from linkedin_mcp_server.exceptions import BrowserBusyError
 from linkedin_mcp_server.login_attempt import PendingLogin, open_pending_login, promote
@@ -277,7 +278,10 @@ async def _run_login(
     stop_when: Callable[[], bool] | None = None,
     viewer: LoginViewer | None = None,
 ) -> bool:
-    async with manager as browser:
+    # The sign-in view borrows the browser only inside this `async with`, so
+    # the manager's teardown never starts while a view can still read or type
+    # into it. Publishing outside it would hand the view a closing browser.
+    async with manager as browser, login_view.published(browser):
         if viewer is not None:
             url = viewer.start_remote_control()
             print(

@@ -1,0 +1,566 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Sign in to LinkedIn</title>
+<style>
+  :root { color-scheme: light dark; }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: transparent;
+    color: var(--color-text-secondary, #6b6a66);
+    font-family: var(--font-sans, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif);
+    font-size: var(--font-text-sm-size, 13px);
+    line-height: var(--font-text-sm-line-height, 1.45);
+  }
+  /* The status line comes first in the DOM, so Tab reaches its button before
+     the page image, which keeps Tab for the remote page. It is shown below the
+     image. */
+  #view { display: flex; flex-direction: column; }
+  #screen { order: 0; flex: none; display: block; width: 100%; height: auto; background: #fff; outline: none; cursor: default; }
+  #screen[hidden] { display: none; }
+  #screen:focus-visible { box-shadow: inset 0 0 0 2px var(--color-ring-primary, #0a66c2); }
+  #status { order: 1; display: flex; flex-wrap: wrap; gap: 8px; align-items: center; padding: 8px 12px; }
+  body.live #status { border-top: 1px solid var(--color-border-secondary, rgba(127, 127, 127, 0.3)); }
+  body.ended #status { padding: 14px 12px; color: var(--color-text-primary, inherit); }
+  body.live #text { color: var(--color-text-primary, inherit); }
+  #text { min-width: 0; overflow-wrap: anywhere; }
+  #dot { width: 8px; height: 8px; border-radius: 50%; flex: none; background: var(--color-text-tertiary, #9a978f); }
+  body.live #dot, body.success #dot { background: var(--color-text-success, #2f9e5c); }
+  body.problem #dot { background: var(--color-text-danger, #c9483b); }
+  #hint { color: var(--color-text-tertiary, #9a978f); }
+  #hint[hidden] { display: none; }
+  #outside {
+    margin-left: auto; flex: none; display: inline-flex; align-items: center; gap: 5px; padding: 4px 9px;
+    border: 1px solid var(--color-border-secondary, rgba(127, 127, 127, 0.3)); border-radius: 7px;
+    background: var(--color-background-secondary, rgba(127, 127, 127, 0.08)); color: var(--color-text-primary, inherit);
+    font: inherit; cursor: pointer; transition: transform 160ms ease-out;
+  }
+  #outside:active { transform: scale(0.97); }
+  #outside:focus-visible { outline: 2px solid var(--color-ring-primary, #0a66c2); outline-offset: 2px; }
+  #outside[hidden] { display: none; }
+</style>
+<!--EXT_APPS_SDK-->
+</head>
+<body>
+<div id="view">
+<div id="status"><span id="dot"></span><span id="text" role="status">Connecting to the sign-in browser.</span><span id="hint" hidden></span><button id="outside" type="button">Sign in from your browser <svg width="12" height="12" viewBox="0 0 12 12" aria-hidden="true"><path d="M4.5 2.5h-2v7h7v-2M6.5 2.5h3v3M9.5 2.5 5 7" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></svg></button></div>
+<img id="screen" tabindex="0" alt="The LinkedIn sign-in page" aria-describedby="screen-keys" draggable="false" hidden>
+<span id="screen-keys" hidden>Press Escape twice to leave the page.</span>
+</div>
+<script type="module">
+// The sign-in view. The server keeps the login; this page only shows the
+// login browser's page and sends the user's input back. The result of
+// open_login names the attempt and the open (structuredContent, no secret),
+// so ontoolresult is registered before connect(). Once both the connection and
+// that binding exist, the page calls login_view_attach, whose result carries
+// the grant in _meta, and polling starts with that grant. Hosts may drop _meta
+// from the model-called result, never from a result of the app's own call.
+const { App } = globalThis.linkedinLoginSdk;
+
+const META_KEY = 'linkedin.dev/login-view';
+const BUDGET_S = 1.5;
+const MAX_EVENTS = 64;
+const MAX_TEXT = 4096;
+const RETRY_MS = 1000;
+// Transport failures of an attach are retried this often, with growing waits.
+const ATTACH_RETRIES = 3;
+const ATTACH_BACKOFF_MS = 500;
+const MAC = /mac|iphone|ipad/i.test(navigator.userAgentData?.platform || navigator.platform || '');
+const NAMED_KEYS = new Set(['Enter', 'Tab', 'Backspace', 'Delete', 'Escape', 'ArrowUp',
+  'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Home', 'End', 'PageUp', 'PageDown']);
+const LIVE = 'Live';
+const PASTE_HINT = `${MAC ? '⌘V' : 'Ctrl+V'} pastes`;
+const SIGNED_IN = 'Signed in to LinkedIn. You can close this.';
+const ENDINGS = {
+  signed_in: [SIGNED_IN, 'success'],
+  repaired_by_peer: [SIGNED_IN, 'success'],
+  restricted: ['LinkedIn restricted this account. Open linkedin.com in your browser to see why.', 'problem'],
+  cancelled: ['The sign-in was stopped.', 'problem'],
+  failed: ['The sign-in did not finish.', 'problem'],
+};
+// The server process that runs this sign-in no longer answers: it stopped, or
+// the sign-in's status ran out. Terminal, like a refusal.
+const UNAVAILABLE = 'The sign-in this view showed is no longer reachable. Ask for the LinkedIn sign-in again.';
+const MAYBE_SENT = 'That input may not have reached the page; check it before typing again.';
+const REFUSALS = {
+  replaced: 'A newer sign-in view replaced this one.',
+  expired: 'This sign-in view expired. Ask for the LinkedIn sign-in again.',
+  denied: 'This view has no access to the sign-in.',
+  unavailable: UNAVAILABLE,
+};
+const GUIDE = 'https://github.com/stickerdaniel/linkedin-mcp-server#sign-in-outside-the-chat';
+const ATTACH_ENDINGS = {
+  replaced: 'A newer sign-in view replaced this one.',
+  none: 'This sign-in is no longer available. Ask for the LinkedIn sign-in again.',
+  unavailable: UNAVAILABLE,
+};
+const UNDELIVERED = 'The chat did not hand this view its access to the sign-in.';
+const UNREACHABLE = 'The chat could not reach the sign-in.';
+
+const screen = document.getElementById('screen');
+const text = document.getElementById('text');
+const hint = document.getElementById('hint');
+const outside = document.getElementById('outside');
+hint.textContent = PASTE_HINT;
+
+const app = new App({ name: 'linkedin-login-view', version: '1.0.0' }, {}, { autoResize: true });
+
+let connected = false;
+let tornDown = false;
+// The attempt and open the latest shown result named. An attach answer or a
+// retry timer for any other binding is discarded.
+let binding = null;
+let attaching = null;
+let attachTries = 0;
+let attachTimer = null;
+let grant = null;
+let attemptId = null;
+let polling = false;
+let ended = false;
+let after = '';
+let pageId = null;
+let geometry = null;
+const queue = [];
+let sending = false;
+// Set once a host that cannot open links was asked for the guide.
+let guided = false;
+let lastStatus = { tone: '', message: text.textContent };
+
+// The way out of the chat stays one click away in every state but a finished
+// sign-in, because the page view cannot show everything a sign-in may need,
+// such as a native browser dialog. Once asked for, the guide's address stays
+// in every status until the sign-in finishes.
+function show(tone, message) {
+  const finished = tone.includes('success');
+  lastStatus = { tone, message };
+  document.body.className = tone;
+  text.textContent = guided && !finished ? `${message} Guide: ${GUIDE}` : message;
+  hint.hidden = tone !== 'live';
+  outside.hidden = finished;
+}
+
+function forgetBinding() {
+  binding = null;
+  attaching = null;
+  clearTimeout(attachTimer);
+  attachTimer = null;
+}
+
+function end(tone, message) {
+  ended = true;
+  grant = null;
+  forgetBinding();
+  queue.length = 0;
+  screen.hidden = true;
+  screen.removeAttribute('src');
+  show(`ended ${tone}`, message);
+}
+
+// Opens the guide to signing in from the user's browser and leaves this view
+// as it is: the login here keeps running, and a sign-in elsewhere ends it,
+// which the next frame reports. The host shows its own dialog with the
+// address, and a cancel there is the user's answer.
+async function signInOutside() {
+  if (app.getHostCapabilities()?.openLinks) {
+    try {
+      await app.openLink({ url: GUIDE });
+    } catch {}
+    return;
+  }
+  guided = true;
+  show(lastStatus.tone, lastStatus.message);
+}
+
+outside.addEventListener('click', signInOutside);
+
+function textOf(result) {
+  const parts = (result?.content ?? []).filter((c) => c.type === 'text').map((c) => c.text);
+  return parts.join(' ').trim();
+}
+
+function applyHostStyles(context) {
+  const variables = context?.styles?.variables;
+  if (variables) {
+    for (const [name, value] of Object.entries(variables)) {
+      if (name.startsWith('--') && typeof value === 'string') {
+        document.documentElement.style.setProperty(name, value);
+      }
+    }
+  }
+  if (context?.theme === 'light' || context?.theme === 'dark') {
+    document.documentElement.style.colorScheme = context.theme;
+  }
+}
+
+app.ontoolresult = (params) => {
+  if (tornDown) return;
+  const shown = params?.structuredContent;
+  if (params?.isError || shown?.view !== 'shown'
+      || typeof shown.attempt_id !== 'string' || typeof shown.open_id !== 'string') {
+    // open_login answered in words instead of a view: a session is already in
+    // place, or the client or container cannot show the sign-in.
+    end(params?.isError ? 'problem' : 'info', textOf(params) || 'There is nothing to sign in to.');
+    return;
+  }
+  if (binding && binding.attemptId === shown.attempt_id && binding.openId === shown.open_id) {
+    return; // the same result again; its attach is pending or done
+  }
+  forgetBinding();
+  binding = { attemptId: shown.attempt_id, openId: shown.open_id };
+  attachTries = 0;
+  grant = null;
+  ended = false;
+  after = '';
+  pageId = null;
+  geometry = null;
+  queue.length = 0;
+  screen.hidden = true;
+  screen.removeAttribute('src');
+  show('waiting', 'Opening the LinkedIn sign-in.');
+  attach();
+};
+
+app.onteardown = async () => {
+  // The login keeps running until its own deadline; a new open_login rejoins it.
+  tornDown = true;
+  forgetBinding();
+  grant = null;
+  queue.length = 0;
+  ended = true;
+  return {};
+};
+
+// One attach in flight per binding. Its answer counts only while that binding
+// is still the current one and the view has not ended.
+function attach() {
+  const asked = binding;
+  if (!connected || !asked || ended || grant || attaching?.binding === asked || attachTimer) return;
+  attaching = { binding: asked, done: attachTo(asked) };
+}
+
+async function attachTo(asked) {
+  let result = null;
+  try {
+    result = await app.callServerTool({
+      name: 'login_view_attach',
+      arguments: { attempt_id: asked.attemptId, open_id: asked.openId },
+    });
+  } catch {
+    result = null;
+  }
+  if (binding !== asked || ended) return;
+  attaching = null;
+  if (result === null) {
+    attachTries += 1;
+    if (attachTries > ATTACH_RETRIES) {
+      end('problem', UNREACHABLE);
+      return;
+    }
+    show('problem', `${UNREACHABLE} Retrying.`);
+    attachTimer = setTimeout(() => {
+      attachTimer = null;
+      if (binding === asked) attach();
+    }, ATTACH_BACKOFF_MS * attachTries);
+    return;
+  }
+  if (result.isError) {
+    end('problem', textOf(result) || UNDELIVERED);
+    return;
+  }
+  let reply = {};
+  try {
+    reply = JSON.parse(textOf(result));
+  } catch {
+    // Read as a missing grant below.
+  }
+  if (reply.access in ATTACH_ENDINGS) {
+    end('problem', ATTACH_ENDINGS[reply.access]);
+    return;
+  }
+  const view = result._meta?.[META_KEY];
+  if (typeof view?.grant !== 'string' || view.attempt_id !== asked.attemptId
+      || view.open_id !== asked.openId) {
+    end('problem', UNDELIVERED);
+    return;
+  }
+  grant = view.grant;
+  attemptId = asked.attemptId;
+  start();
+}
+
+app.onhostcontextchanged = applyHostStyles;
+
+document.addEventListener('visibilitychange', () => {
+  if (!document.hidden) start();
+});
+
+function start() {
+  if (connected && grant && !ended && !polling && !document.hidden) poll();
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function poll() {
+  polling = true;
+  try {
+    while (connected && grant && !ended && !document.hidden) {
+      const asked = grant;
+      let result;
+      try {
+        result = await app.callServerTool({
+          name: 'login_view_frame',
+          arguments: { grant, attempt_id: attemptId, after, budget_s: BUDGET_S },
+        });
+      } catch {
+        if (grant === asked && !ended) show('problem', 'The chat lost the sign-in view. Retrying.');
+        await sleep(RETRY_MS);
+        continue;
+      }
+      if (grant !== asked || ended) continue;
+      if (result.isError) {
+        end('problem', textOf(result) || 'The sign-in view failed.');
+        break;
+      }
+      onFrame(result);
+    }
+  } finally {
+    polling = false;
+  }
+}
+
+function onFrame(result) {
+  let reply;
+  try {
+    reply = JSON.parse(textOf(result));
+  } catch {
+    return;
+  }
+  if (reply.access in REFUSALS) {
+    end('problem', REFUSALS[reply.access]);
+    return;
+  }
+  const ending = ENDINGS[reply.state];
+  if (ending) {
+    const [message, tone] = ending;
+    end(tone, reply.state === 'failed' && reply.reason ? `${message} ${reply.reason}` : message);
+    return;
+  }
+  const image = (result.content ?? []).find((c) => c.type === 'image');
+  if (reply.frame === 'image' && image) {
+    screen.src = `data:${image.mimeType};base64,${image.data}`;
+    screen.hidden = false;
+    after = reply.hash;
+    pageId = reply.page_id;
+    geometry = reply.geometry;
+  }
+  if (screen.hidden) show('waiting', 'Opening the LinkedIn sign-in.');
+  else show('live', LIVE);
+}
+
+// ---- input: one queue, one batch in flight, never replayed ----
+//
+// Every queued event keeps the target the user acted on: the attempt, page
+// and geometry shown when the event happened. A batch carries events of one
+// target only, and events whose page is no longer shown are dropped, never
+// sent to whichever page replaced it.
+
+const STALE = 'The page changed before that input arrived. Try it again.';
+
+function sameTarget(a, b) {
+  return a.attemptId === b.attemptId && a.pageId === b.pageId && a.geometry === b.geometry;
+}
+
+function shownTarget() {
+  return { attemptId, pageId, geometry };
+}
+
+function send(event) {
+  if (!grant || ended || !pageId) return;
+  const target = shownTarget();
+  const last = queue[queue.length - 1];
+  const joins = last && sameTarget(last.target, target);
+  if (joins && event.type === 'type' && last.event.type === 'type'
+      && last.event.text.length + event.text.length <= MAX_TEXT) {
+    last.event.text += event.text;
+  } else if (joins && event.type === 'wheel' && last.event.type === 'wheel') {
+    last.event.dy += event.dy;
+    last.event.x = event.x;
+    last.event.y = event.y;
+  } else {
+    queue.push({ target, event });
+  }
+  pump();
+}
+
+function dropTarget(target) {
+  for (let i = queue.length - 1; i >= 0; i -= 1) {
+    if (sameTarget(queue[i].target, target)) queue.splice(i, 1);
+  }
+}
+
+function takeBatch() {
+  const target = queue[0].target;
+  const events = [];
+  let chars = 0;
+  while (queue.length && events.length < MAX_EVENTS && sameTarget(queue[0].target, target)) {
+    const size = queue[0].event.text?.length ?? 0;
+    if (events.length && chars + size > MAX_TEXT) break;
+    chars += size;
+    events.push(queue.shift().event);
+  }
+  return { target, events };
+}
+
+async function pump() {
+  if (sending) return;
+  sending = true;
+  try {
+    while (queue.length && grant && !ended) {
+      if (!sameTarget(queue[0].target, shownTarget())) {
+        dropTarget(queue[0].target);
+        show('problem', STALE);
+        continue;
+      }
+      const { target, events } = takeBatch();
+      let result;
+      try {
+        result = await app.callServerTool({
+          name: 'login_view_input',
+          arguments: {
+            grant,
+            attempt_id: target.attemptId,
+            page_id: target.pageId,
+            geometry: target.geometry,
+            events,
+          },
+        });
+      } catch {
+        // Whether the call failed before or after the server sent the batch
+        // on is unknown here, so nothing claims it did not arrive. Input
+        // queued behind it, such as a password typed after a click that may
+        // not have landed, is dropped until the user acts again.
+        queue.length = 0;
+        if (!ended) show('problem', MAYBE_SENT);
+        break;
+      }
+      if (result.isError) {
+        // Such as a batch whose answer never came back from the process that
+        // runs the sign-in: the server's text says what is known.
+        queue.length = 0;
+        if (!ended) show('problem', textOf(result) || MAYBE_SENT);
+        break;
+      }
+      let reply = {};
+      try {
+        reply = JSON.parse(textOf(result));
+      } catch {
+        // Not an answer of this view's tool; the next frame says what happened.
+      }
+      if (!ended && reply.access === 'unavailable') {
+        end('problem', UNAVAILABLE);
+        break;
+      }
+      if (!ended && reply.input === 'interrupted') {
+        queue.length = 0;
+        show('problem', MAYBE_SENT);
+        break;
+      }
+      if (!ended && reply.input === 'stale') {
+        dropTarget(target);
+        show('problem', STALE);
+      }
+    }
+  } finally {
+    sending = false;
+  }
+}
+
+function pointAt(event) {
+  const box = screen.getBoundingClientRect();
+  return { x: (event.clientX - box.left) / box.width, y: (event.clientY - box.top) / box.height };
+}
+
+screen.addEventListener('mousedown', (event) => event.preventDefault());
+screen.addEventListener('click', (event) => {
+  screen.focus();
+  send({ type: 'click', ...pointAt(event), button: 'left' });
+});
+screen.addEventListener('contextmenu', (event) => {
+  event.preventDefault();
+  screen.focus();
+  send({ type: 'click', ...pointAt(event), button: 'right' });
+});
+screen.addEventListener('wheel', (event) => {
+  event.preventDefault();
+  const lines = event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? screen.clientHeight : 1;
+  send({ type: 'wheel', ...pointAt(event), dy: event.deltaY * lines });
+}, { passive: false });
+
+// The image forwards Tab and Escape to the remote page, so focus would never
+// leave it. A second Escape within ESCAPE_TWICE_MS is the way out: it is not
+// forwarded and moves focus to the button that leads out of the chat.
+const ESCAPE_TWICE_MS = 1000;
+let lastEscape = -Infinity;
+
+screen.addEventListener('keydown', (event) => {
+  if (event.isComposing) return;
+  if (event.key === 'Escape' && !event.repeat) {
+    if (event.timeStamp - lastEscape < ESCAPE_TWICE_MS && !outside.hidden) {
+      event.preventDefault();
+      lastEscape = -Infinity;
+      outside.focus();
+      return;
+    }
+    lastEscape = event.timeStamp;
+  } else {
+    lastEscape = -Infinity;
+  }
+  const shortcut = MAC ? event.metaKey : event.ctrlKey;
+  if (shortcut && !event.altKey && event.key.toLowerCase() === 'v') {
+    // Left to the browser, which fires the paste event below with the text.
+    return;
+  }
+  const modifiers = [];
+  if (event.altKey) modifiers.push('Alt');
+  if (event.ctrlKey) modifiers.push('Control');
+  if (event.metaKey) modifiers.push('Meta');
+  if (event.shiftKey) modifiers.push('Shift');
+  if (NAMED_KEYS.has(event.key)) {
+    event.preventDefault();
+    send({ type: 'key', key: event.key, modifiers });
+  } else if (event.key.length === 1 && (event.ctrlKey || event.metaKey)) {
+    event.preventDefault();
+    send({ type: 'key', key: event.key.toLowerCase(), modifiers });
+  } else if ([...event.key].length === 1) {
+    event.preventDefault();
+    send({ type: 'type', text: event.key });
+  }
+});
+
+document.addEventListener('paste', (event) => {
+  event.preventDefault();
+  // Split by code point, the unit the server counts, so no chunk ends inside
+  // a surrogate pair.
+  const pasted = Array.from(event.clipboardData?.getData('text/plain') ?? '');
+  for (let i = 0; i < pasted.length; i += MAX_TEXT) {
+    send({ type: 'paste', text: pasted.slice(i, i + MAX_TEXT).join('') });
+  }
+});
+
+app.connect().then(() => {
+  connected = true;
+  applyHostStyles(app.getHostContext());
+  if (!binding && !ended) show('waiting', 'Waiting for the sign-in to start.');
+  attach();
+  start();
+}).catch(() => {
+  end('problem', 'The chat could not open the sign-in view.');
+});
+</script>
+</body>
+</html>

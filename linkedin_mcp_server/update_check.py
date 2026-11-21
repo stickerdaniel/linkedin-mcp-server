@@ -31,6 +31,7 @@ from packaging.version import InvalidVersion, Version
 
 from linkedin_mcp_server import __version__
 from linkedin_mcp_server.config.loaders import FALSY_VALUES
+from linkedin_mcp_server.login_view import LOGIN_VIEW_TOOLS
 from linkedin_mcp_server.remote_tools import is_remote
 
 logger = logging.getLogger(__name__)
@@ -252,9 +253,10 @@ class UpdateNoticeMiddleware(Middleware):
     ) -> ToolResult:
         # The status tool reads local state only, and a remote catalog tool
         # never touches LinkedIn; leave both the update check and its notice
-        # for a browser tool.
+        # for a browser tool. The sign-in view's tools answer a page, not the
+        # model, so a notice there would reach nobody.
         name = context.message.name
-        if name == "get_session_status" or is_remote(name):
+        if name == "get_session_status" or name in LOGIN_VIEW_TOOLS or is_remote(name):
             return await call_next(context)
         if not self._kicked:
             self._kicked = True
