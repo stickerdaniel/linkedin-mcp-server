@@ -320,6 +320,9 @@ async def test_finished_tasks_are_observed_without_reconciliation(
             raise asyncio.CancelledError
         return outcome == "success" if kind == "import" else None
 
+    if (kind, outcome) == ("login", "success"):
+        # What the login left on disk, as a successful one does.
+        _store_session()
     task = asyncio.create_task(work())
     setattr(state, f"{kind}_task", task)
     field = "auto_import" if kind == "import" else kind
@@ -419,7 +422,6 @@ async def test_status_preserves_previous_login_failure_in_the_retry(
         bootstrap, "start_background_browser_setup_if_needed", AsyncMock()
     )
     monkeypatch.setattr(bootstrap, "_auto_import_allowed", lambda: False)
-    monkeypatch.setattr(bootstrap, "_move_invalid_auth_state_aside", lambda *_: None)
     hold = asyncio.Event()
     monkeypatch.setattr(bootstrap, "_run_login_flow", hold.wait)
     try:
@@ -658,3 +660,24 @@ async def test_authenticated_proxy_status_bypasses_browser_work_not_owner_admiss
         serving_owner.should_exit = True
         await asyncio.wait_for(serving, 10)
         listener.close()
+
+
+async def test_a_session_published_while_answering_is_reported_consistently(
+    server, nothing_may_start, monkeypatch
+):
+    bootstrap.get_bootstrap_state().auth_state = bootstrap.AuthState.READY
+    reads = iter([False, True, True])
+
+    def published_after_the_first_read(*_args, **_kwargs):
+        return next(reads)
+
+    for module in ("session_status", "bootstrap"):
+        monkeypatch.setattr(
+            f"linkedin_mcp_server.{module}._auth_ready",
+            published_after_the_first_read,
+        )
+
+    status = await _status(server)
+
+    assert status["session"]["stored"] is False
+    assert status["login"] != "auth_ready"

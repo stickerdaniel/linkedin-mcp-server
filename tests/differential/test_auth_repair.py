@@ -109,16 +109,17 @@ from differential.synthetic_origin import (
     ISSUED_PREFIX,
     LOGIN_MARKER,
     LOGIN_PATH,
+    BROWSER_COOKIE,
     LOGIN_POLL_PATH,
     LOGIN_REDIRECT,
     LOGIN_POLL_TIMEOUT_SECONDS,
     SyntheticOrigin,
+    cookie_values,
     session_digest,
 )
 from differential.test_call_loss import (  # noqa: F401 - fixtures
     _CalibrationScene,
     _connect,
-    _send,
     certificates,
     origin,
     owned,
@@ -144,7 +145,6 @@ from linkedin_mcp_server.core.auth import (
 )
 from linkedin_mcp_server.core.exceptions import AuthenticationError
 from linkedin_mcp_server.daemon.auth_repair import MARKER_KEY
-from linkedin_mcp_server.daemon.liveness import HEARTBEAT_PATH
 from linkedin_mcp_server.session_state import (
     QUARANTINE_PREFIX,
     portable_cookie_path,
@@ -183,7 +183,7 @@ def _short_waits(monkeypatch):
     for name, seconds in (
         ("CLOSE_SECONDS", 5.0),
         ("LOGIN_START_SECONDS", 10.0),
-        ("SECOND_WAITING_SECONDS", 10.0),
+        ("SECOND_LOGIN_SECONDS", 10.0),
         ("COMPLETION_SECONDS", 10.0),
         ("READ_SECONDS", 30.0),
         ("SECOND_SECONDS", 30.0),
@@ -195,12 +195,26 @@ def _short_waits(monkeypatch):
 
 
 def _exchange(
-    served: SyntheticOrigin, ca: Path, path: str, cookie: str | None = None
+    served: SyntheticOrigin,
+    ca: Path,
+    path: str,
+    cookie: str | None = None,
+    *,
+    browser: str | None = None,
 ) -> tuple[int, dict[str, str], bytes]:
-    """One request to the real origin: its status, headers by lower-cased
-    name, and body."""
+    """One request to the real origin, sending *cookie* as its ``li_at`` and
+    *browser* as its ``browser_id``: its status, headers by lower-cased name,
+    and body."""
+    sent = [
+        f"{name}={value}"
+        for name, value in (("li_at", cookie), (BROWSER_COOKIE, browser))
+        if value is not None
+    ]
+    lines = [f"GET {path} HTTP/1.1", "Host: www.linkedin.com", "Connection: close"]
+    if sent:
+        lines.append(f"Cookie: {'; '.join(sent)}")
     with _connect(served, ca) as connection:
-        _send(connection, path, cookie)
+        connection.sendall(("\r\n".join(lines) + "\r\n\r\n").encode())
         data = b""
         while chunk := connection.recv(65536):
             data += chunk
@@ -215,6 +229,12 @@ def _exchange(
 
 def _issued_value(headers: dict[str, str]) -> str:
     return headers["set-cookie"].split(";", 1)[0].removeprefix("li_at=")
+
+
+def _browser_name(headers: dict[str, str]) -> str | None:
+    """The ``browser_id`` the wall set, or ``None``."""
+    values = cookie_values(headers.get("set-cookie"), BROWSER_COOKIE)
+    return values[0] if values else None
 
 
 def test_a_healthy_origin_serves_no_wall_and_no_sign_in(served, ca, on_disk):
@@ -351,6 +371,59 @@ def test_two_browsers_asking_after_one_release_are_both_issued_and_counted(
 
     assert first != second
     assert [item["ordinal"] for item in served.login_record()["issued"]] == [1, 2]
+
+
+def test_a_reload_or_a_second_tab_is_the_same_browser_and_a_fresh_one_is_not(
+    served,
+    ca,
+    on_disk,
+):
+    """The negative control of the second frontend's release: the first
+    login's browser reloads its wall and opens it in a second tab, and the
+    origin still sees one browser. Only a browser that arrives with no name,
+    as one started in an empty profile does, is another."""
+    _, staged = on_disk
+    served.accept_session(staged.li_at)
+    served.reject_sessions()
+    _, headers, _ = _exchange(served, ca, LOGIN_PATH)
+    first = _browser_name(headers)
+    assert first is not None
+    since = time.monotonic_ns()
+
+    for _ in range(2):
+        _, again, _ = _exchange(served, ca, LOGIN_PATH, browser=first)
+        assert "set-cookie" not in again
+    assert auth_repair.second_login_opened(served.login_record(), since) is None
+
+    _, headers, _ = _exchange(served, ca, LOGIN_PATH)
+    second = _browser_name(headers)
+    assert second is not None and second != first
+    record = served.login_record()
+    assert [page["browser"] for page in record["login_pages"]] == [1, 1, 1, 2]
+    assert (
+        auth_repair.second_login_opened(record, since)
+        == record["login_pages"][-1]["at_ns"]
+    )
+    # By ordinal only: no name the wall set is in what the origin recorded.
+    assert first not in json.dumps(record) and second not in json.dumps(record)
+
+
+def test_a_release_naming_one_browser_issues_to_it_alone(served, ca, on_disk):
+    _, staged = on_disk
+    served.accept_session(staged.li_at)
+    served.reject_sessions()
+    first = _browser_name(_exchange(served, ca, LOGIN_PATH)[1])
+    second = _browser_name(_exchange(served, ca, LOGIN_PATH)[1])
+
+    assert served.release_login(browser=1)["browser"] == 1
+    assert _exchange(served, ca, LOGIN_POLL_PATH, browser=second)[0] == 204
+    assert _exchange(served, ca, LOGIN_POLL_PATH)[0] == 204
+    status, headers, _ = _exchange(served, ca, LOGIN_POLL_PATH, browser=first)
+    assert status == 200 and _issued_value(headers).startswith(ISSUED_PREFIX)
+    record = served.login_record()
+    assert [item["browser"] for item in record["issued"]] == [1]
+    assert record["released_browser"] == 1
+    assert record["answers"]["pending"] == 2
 
 
 def test_each_sign_in_ask_is_bounded_below_the_navigation_and_relay_limits():
@@ -682,6 +755,7 @@ def _sign_in(*, released: int | None, issued: list[int], last_poll: int) -> dict
         "rejections": [{"digests": [STAGED], "monotonic_ns": 1_300 * MS}],
         "walls": [1_600 * MS],
         "redirects": [1_500 * MS],
+        "login_pages": [{"at_ns": 1_600 * MS, "browser": 1}],
         "polls": 20,
         "first_poll_ns": 1_700 * MS,
         "last_poll_ns": last_poll * MS,
@@ -690,9 +764,16 @@ def _sign_in(*, released: int | None, issued: list[int], last_poll: int) -> dict
         "released_ns": released * MS if released is not None else None,
         "released_by": "row" if released is not None else None,
         "released_phase": "row" if released is not None else None,
+        "released_browser": None,
         "closed_ns": 20_000 * MS,
         "issued": [
-            {"digest": FRESH, "issued_ns": at * MS, "phase": "row", "ordinal": n + 1}
+            {
+                "digest": FRESH,
+                "issued_ns": at * MS,
+                "phase": "row",
+                "ordinal": n + 1,
+                "browser": 1,
+            }
             for n, at in enumerate(issued)
         ],
     }
@@ -704,18 +785,6 @@ def _sign_in(*, released: int | None, issued: list[int], last_poll: int) -> dict
 _HAND_OVER = (
     "Another LinkedIn MCP client is using the browser; waiting for it to hand over"
 )
-
-
-def _progress(lock: int, waiting: int | None) -> list[dict[str, Any]]:
-    """The second host's progress as its client heard it: the owner's queue
-    and lock at *lock* ms, and its wait for the profile at *waiting* ms."""
-    heard = [
-        {"message": "Queued waiting for the browser lock", "seen_ns": lock * MS},
-        {"message": "Browser lock acquired, starting tool", "seen_ns": lock * MS},
-    ]
-    if waiting is not None:
-        heard.append({"message": _HAND_OVER, "seen_ns": waiting * MS})
-    return heard
 
 
 def _base(row: str, *, daemon: bool) -> dict:
@@ -829,22 +898,27 @@ def _repair(row: str = ROW_COLD, *, daemon: bool = True) -> dict:
     if daemon:
         record["marked"] = [{"reason": "stale", "replayable": True}]
         record["marks"] = 1
-        record["profile_waits_ran_out"] = 0
         record["owner_after"] = _owner(9_500)
     if row == ROW_SECOND:
-        # Sent at 2 s; the owner said at 2.4 s that it waits for the profile,
-        # before the release. The login over at 6.5 s, the second read ending
-        # on the fresh session at 9.5 s. It met no marker: its call waited at
-        # the owner for the profile the login held.
-        record["login_over_ns"] = 6_500 * MS
+        # Launched at 1.8 s and sent at 2 s; the owner marked it too, and its
+        # frontend's own login, a browser the origin had not seen, opened its
+        # wall at 2.3 s, before the release, which named the first login's
+        # browser alone. That login ended on the session the first one
+        # published, and the second read ran again and ended on it at 9.5 s.
+        if daemon:
+            record["marked"] = record["marked"] * 2
+            record["marks"] = 2
+        record["login"]["login_pages"].append({"at_ns": 2_300 * MS, "browser": 2})
+        record["login"]["released_browser"] = 1
+        record["release"]["browser"] = 1
         record["second"] = {
             "made": True,
             "launched_ns": 1_800 * MS,
             "call": _feed(2_000, 9_500),
             "forwarded": True,
             "quit_problems": [],
-            "lines": {"replayed": 0, "not_replayed": 0, "signed_in": 0, "peer": 0},
-            "progress": _progress(2_100, 2_400),
+            "lines": {"replayed": 1, "not_replayed": 0, "signed_in": 1, "peer": 0},
+            "progress": [],
             "retained": False,
         }
     return record
@@ -1373,31 +1447,57 @@ def test_direct_must_answer_the_cold_read_with_a_started_login_and_then_read():
     ]
 
 
-_NOT_WAITING = (
-    f"{INVALID}the owner did not say the second host's read waited for the "
-    f"profile before the release"
+_NOT_OPENED = (
+    f"{INVALID}the second frontend's login did not open its wall before the release"
 )
+_NO_MARKER = (
+    "no marker reached the second frontend: its read waited at the owner "
+    "instead of signing in beside the first login"
+)
+
+
+def _no_marker(record: dict) -> None:
+    """The second read waited at the owner for the profile and met no
+    marker: the owner marked once, and the second frontend repaired
+    nothing."""
+    record["second"]["lines"].update(signed_in=0, replayed=0)
+    record.update(marks=1, marked=record["marked"][:1])
 
 
 @pytest.mark.parametrize(
     ("change", "problem"),
     [
         pytest.param(
-            # The owner queued it and took its lock, but never said it waits
-            # for the profile: nothing shows the read got there.
-            lambda r: r["second"].update(progress=_progress(2_100, None)),
-            _NOT_WAITING,
-            id="never-said-waiting",
+            # Only the first login's browser ever asked for the wall.
+            lambda r: r["login"].update(login_pages=r["login"]["login_pages"][:1]),
+            _NOT_OPENED,
+            id="no-second-wall",
         ),
         pytest.param(
-            lambda r: r["second"].update(progress=[]),
-            _NOT_WAITING,
-            id="no-progress",
+            # The first login's browser, reloading or in a second tab.
+            lambda r: r["login"]["login_pages"][1].update(browser=1),
+            _NOT_OPENED,
+            id="the-first-browser-again",
         ),
         pytest.param(
-            lambda r: r["second"].update(progress=_progress(2_100, 2_600)),
-            _NOT_WAITING,
-            id="waiting-after-the-release",
+            lambda r: r["login"]["login_pages"][1].update(at_ns=2_600 * MS),
+            _NOT_OPENED,
+            id="wall-after-the-release",
+        ),
+        pytest.param(
+            lambda r: r["login"]["login_pages"][1].update(at_ns=1_700 * MS),
+            _NOT_OPENED,
+            id="wall-before-the-launch",
+        ),
+        pytest.param(
+            lambda r: r["login"].update(released_browser=None),
+            f"{INVALID}the release did not name the first login's browser alone",
+            id="release-to-any-browser",
+        ),
+        pytest.param(
+            _no_marker,
+            _NO_MARKER,
+            id="waited-at-the-owner",
         ),
         pytest.param(
             lambda r: r["second"]["call"].update(is_error=True, read_the_post=False),
@@ -1412,25 +1512,16 @@ _NOT_WAITING = (
         ),
         pytest.param(
             # A marker reached it, and it repaired, but never read again.
-            lambda r: (
-                r["second"]["lines"].update(signed_in=1),
-                r.update(marks=2, marked=r["marked"] * 2),
-            ),
+            lambda r: r["second"]["lines"].update(replayed=0),
             "the second frontend repaired on a marker but did not run its read "
             "again exactly once: 0",
             id="marker-without-a-replay",
         ),
         pytest.param(
             # It replayed on a marker the owner's log never shows it gave.
-            lambda r: r["second"]["lines"].update(signed_in=1, replayed=1),
+            lambda r: r.update(marks=1, marked=r["marked"][:1]),
             "the owner marked 1 failure(s), not 2",
             id="replayed-without-its-marker",
-        ),
-        pytest.param(
-            # Its call waited for the profile, yet the owner marked it too.
-            lambda r: r.update(marks=2, marked=r["marked"] * 2),
-            "the owner marked 2 failure(s), not 1",
-            id="marked-without-a-repair",
         ),
     ],
 )
@@ -1441,282 +1532,19 @@ def test_the_second_frontend_holds_each_of_its_observations(change, problem):
     assert problem in repair_problems(record, daemon=True)
 
 
-def test_a_second_frontend_a_marker_reached_ends_on_the_one_fresh_session():
-    """The latch's branch, which the models cover, still reads valid when a
-    run reaches it: the owner marked both reads, and the second frontend
-    repaired and ran its read again once."""
+def test_a_second_frontend_that_met_no_marker_is_a_finding_and_never_invalid():
+    """The serialised answer: the second read waited at the owner for the
+    profile, so no second login opened its wall. That is the product's
+    finding, never a cell left unmeasured."""
     record = _repair(ROW_SECOND)
-    record["second"]["lines"].update(signed_in=1, replayed=1, peer=1)
-    record.update(marks=2, marked=record["marked"] * 2)
-
-    assert repair_problems(record, daemon=True) == []
-    assert semantics(record)["second_met"] == auth_repair.MET_MARKER
-    assert semantics(_repair(ROW_SECOND))["second_met"] == auth_repair.MET_PROFILE
-    assert semantic_differences(_repair(ROW_SECOND), record) == [
-        "marks: 1 then 2",
-        f"second_met: {auth_repair.MET_PROFILE!r} then {auth_repair.MET_MARKER!r}",
-    ]
-
-
-def _second_gave_up(
-    record: dict,
-    *,
-    spent: int,
-    asked_until: int | None = None,
-    over: int | None = 6_500,
-) -> dict:
-    """The owner answered the second read busy *spent* ms after it was sent
-    (at 2 s), and logged that its wait ran out. With *asked_until*, the
-    login's page still asked until then and was issued its session there;
-    the first frontend said its login was over at *over*."""
-    record["second"]["call"].update(
-        is_error=True,
-        read_the_post=False,
-        ended_monotonic_ns=(2_000 + spent) * MS,
-    )
-    record["profile_waits_ran_out"] = 1
-    if asked_until is not None:
-        record["login"]["issued"][0]["issued_ns"] = asked_until * MS
-        record["login"]["last_poll_ns"] = asked_until * MS
-    record["login_over_ns"] = over * MS if over is not None else None
-    return record
-
-
-#: The owner's whole ``BROWSER_WAIT``, and a little over, from send to answer.
-_FULL_WAIT = 25_100
-
-
-def _unshown(spent: str) -> str:
-    return (
-        f"{INVALID}the owner answered the second read busy {spent}s after it was "
-        f"sent, and whether it waited its whole BROWSER_WAIT of 25s while the "
-        f"login held the profile is not shown: nothing stamps where its wait began"
-    )
-
-
-def test_a_busy_answer_while_the_login_still_asked_leaves_the_order_unshown():
-    """The call took the whole budget and the login's page asked after the
-    busy answer was in. The owner may have waited it all, or refused early
-    behind a slow hop: nothing shows which, so the cell is invalid, and never
-    for the release missing a budget."""
-    record = _second_gave_up(
-        _repair(ROW_SECOND), spent=_FULL_WAIT, asked_until=28_000, over=31_000
-    )
+    _no_marker(record)
+    record["login"]["login_pages"] = record["login"]["login_pages"][:1]
     problems = repair_problems(record, daemon=True)
 
-    assert invalid_evidence(problems) == [_unshown("25.1")]
-    assert _findings(problems) == []
-
-
-@pytest.mark.parametrize(
-    "over",
-    [
-        pytest.param(None, id="never-over"),
-        # Over exactly when a budget begun at the send would run out.
-        pytest.param(27_000, id="over-as-the-budget-ends"),
-        pytest.param(31_000, id="over-late"),
-    ],
-)
-def test_a_busy_answer_not_shown_against_the_login_s_end_is_invalid_with_its_reason(
-    over,
-):
-    record = _second_gave_up(_repair(ROW_SECOND), spent=_FULL_WAIT, over=over)
-    problems = repair_problems(record, daemon=True)
-
-    assert invalid_evidence(problems) == [_unshown("25.1")]
-    assert _findings(problems) == []
-
-
-def _probe(record: dict, *, heard: int, answered: int, asked_until: int) -> dict:
-    """The reviewer's hop probes as a record: the second read sent at 2 s,
-    the owner's report of its wait heard at *heard*, the row releasing on
-    it, the busy answer at *answered*, and the login's page asking, then
-    issued, at *asked_until*. The first frontend never said its login was
-    over before the answer."""
-    record = _second_gave_up(
-        record, spent=answered - 2_000, asked_until=asked_until, over=None
-    )
-    record["second"]["progress"] = _progress(2_050, heard)
-    record["login"]["released_ns"] = (heard + 30) * MS
-    record["release"]["released_ns"] = (heard + 30) * MS
-    return record
-
-
-@pytest.mark.parametrize(
-    ("heard", "answered"),
-    [
-        # The frontend held up 2.2 s before the report of the wait: the owner
-        # waited its whole 25.002 s, heard as 22.8 s, the call 25.068 s.
-        pytest.param(4_272, 27_068, id="report-held-up"),
-        # The frontend held up 2.2 s around the answer: the owner refused
-        # after 23.002 s, heard as 25.2 s, the call 25.277 s.
-        pytest.param(2_072, 27_277, id="answer-held-up"),
-    ],
-)
-def test_a_frontend_hop_held_up_never_decides_the_owner_s_wait(heard, answered):
-    """Neither a whole wait heard short nor an early refusal heard whole is
-    read from the hop: both calls took the whole budget, so the order is
-    unshown in both, and neither is a finding or the release's miss."""
-    record = _probe(
-        _repair(ROW_SECOND),
-        heard=heard,
-        answered=answered,
-        asked_until=answered + 1_000,
-    )
-    problems = repair_problems(record, daemon=True)
-
-    assert problems == [_unshown(f"{(answered - 2_000) / 1000:.1f}")]
-
-
-_SECOND_FAILED = (
-    "the second host's read did not end on the new generation: outcome "
-    "'returned', error True"
-)
-
-
-def _early(spent: str) -> str:
-    return (
-        f"the owner answered the second read busy {spent}s after it was sent, "
-        f"before its BROWSER_WAIT of 25s could run out"
-    )
-
-
-def _past_the_login(lead: str) -> str:
-    return (
-        f"the owner answered the second read busy although the first frontend's "
-        f"login was over {lead}s before its BROWSER_WAIT of 25s could run out: it "
-        f"gave up early or passed over the free profile"
-    )
-
-
-@pytest.mark.parametrize(
-    ("change", "findings", "invalid"),
-    [
-        pytest.param(
-            # The owner gave up 2.1 s after the send in a 25 s wait: the
-            # reviewer's injected lease refusal, read as a record.
-            lambda r: _second_gave_up(r, spent=2_100),
-            [_early("2.1")],
-            [],
-            id="refused-early",
-        ),
-        pytest.param(
-            # Any whole call shorter than the budget holds a shorter wait.
-            lambda r: _second_gave_up(r, spent=24_900, over=None),
-            [_early("24.9")],
-            [],
-            id="refused-just-early",
-        ),
-        pytest.param(
-            # A budget begun at the send ends 20.5 s after the login said it
-            # was over: the owner refused early or passed over a free profile.
-            lambda r: _second_gave_up(r, spent=_FULL_WAIT),
-            [_past_the_login("20.5")],
-            [],
-            id="after-the-login",
-        ),
-        pytest.param(
-            lambda r: _second_gave_up(r, spent=_FULL_WAIT, over=26_900),
-            [_past_the_login("0.1")],
-            [],
-            id="just-after-the-login",
-        ),
-        pytest.param(
-            # The wait ran out, and the owner never said the read waited:
-            # nothing about the busy answer is shown either way.
-            lambda r: (
-                _second_gave_up(r, spent=_FULL_WAIT, asked_until=28_000, over=None),
-                r["second"].update(progress=_progress(2_100, None)),
-            ),
-            [],
-            [_NOT_WAITING, _unshown("25.1")],
-            id="no-wait-start",
-        ),
-        pytest.param(
-            # The read failed, and the owner never gave up on a wait.
-            lambda r: _second_gave_up(
-                r, spent=_FULL_WAIT, asked_until=28_000, over=None
-            ).update(profile_waits_ran_out=0),
-            [_SECOND_FAILED],
-            [],
-            id="no-wait-ran-out",
-        ),
-    ],
-)
-def test_a_second_read_that_fails_otherwise_is_read_from_its_bounds(
-    change, findings, invalid
-):
-    record = _repair(ROW_SECOND)
-    change(record)
-    problems = repair_problems(record, daemon=True)
-
-    assert _findings(problems) == findings
-    assert invalid_evidence(problems) == invalid
-
-
-async def test_the_owner_refusing_a_wait_early_is_a_finding_and_never_the_rows(
-    caplog, monkeypatch
-):
-    """The reviewer's probe: a lease refusal 0.2 s into the declared 25 s,
-    through the real middleware and its real line, timed from the call's
-    send to its answer. Read into the cell's record, it is the owner's
-    finding; nothing about it is invalid."""
-    from fastmcp.exceptions import ToolError
-
-    from linkedin_mcp_server import sequential_tool_middleware as sequential
-
-    asked: list[float] = []
-
-    class RefusingEarly:
-        def try_acquire(self) -> bool:
-            return False
-
-        async def acquire(self, timeout: float) -> bool:
-            asked.append(timeout)
-            await asyncio.sleep(0.2)
-            return False
-
-    heard: list[dict[str, Any]] = []
-    context = SimpleNamespace(
-        message=SimpleNamespace(name=harness.READ_TOOL),
-        fastmcp_context=SimpleNamespace(
-            request_context=object(), report_progress=harness.progress_recorder(heard)
-        ),
-    )
-
-    async def never(context: Any) -> Any:
-        raise AssertionError("a refused call must not reach its tool")
-
-    monkeypatch.setattr(sequential, "get_profile_lease", RefusingEarly)
-    monkeypatch.setattr(
-        sequential,
-        "get_config",
-        lambda: SimpleNamespace(
-            browser=SimpleNamespace(
-                browser_wait_seconds=auth_repair.BROWSER_WAIT_SECONDS
-            )
-        ),
-    )
-    sent = time.monotonic_ns()
-    with caplog.at_level("INFO", logger=sequential.__name__):
-        with pytest.raises(ToolError):
-            await sequential.SequentialToolExecutionMiddleware().on_call_tool(
-                cast(Any, context), never
-            )
-    answered = time.monotonic_ns()
-
-    assert asked == [auth_repair.BROWSER_WAIT_SECONDS]
-    assert auth_repair.profile_wait_started(heard) is not None
-    record = _second_gave_up(_repair(ROW_SECOND), spent=(answered - sent) // MS)
-    record["profile_waits_ran_out"] = auth_repair._count(
-        [r.getMessage() for r in caplog.records], auth_repair.PROFILE_WAIT_LINE
-    )
-    problems = repair_problems(record, daemon=True)
-
-    assert record["profile_waits_ran_out"] == 1
+    assert _findings(problems) == [_NO_MARKER]
     assert invalid_evidence(problems) == []
-    [finding] = _findings(problems)
-    assert finding.startswith("the owner answered the second read busy 0."), finding
+    assert semantics(record)["second_met"] == auth_repair.MET_PROFILE
+    assert semantics(_repair(ROW_SECOND))["second_met"] == auth_repair.MET_MARKER
 
 
 def test_direct_refusing_its_read_again_over_its_own_unconfirmed_close_is_valid():
@@ -2142,17 +1970,30 @@ class _Login:
         self.scene = scene
         self.budget = budget
         self.outcome: str | None = None
+        #: The ``browser_id`` its wall set, which its asks send.
+        self.browser: str | None = None
+        self.opened = threading.Event()
         self.thread = threading.Thread(target=self._run, daemon=True)
         self.thread.start()
+
+    def open_again(self) -> None:
+        """Its browser loads the wall once more, as a reload or a second tab
+        does: with the name the wall set."""
+        self.opened.wait(10)
+        _exchange(
+            self.scene.origin, self.scene.certificates, LOGIN_PATH, browser=self.browser
+        )
 
     def _run(self) -> None:
         scene = self.scene
         quarantine = _rotate(scene.directory)
-        _exchange(scene.origin, scene.certificates, LOGIN_PATH)
+        _, opened, _ = _exchange(scene.origin, scene.certificates, LOGIN_PATH)
+        self.browser = _browser_name(opened)
+        self.opened.set()
         deadline = time.monotonic() + self.budget
         while time.monotonic() < deadline:
             status, headers, _ = _exchange(
-                scene.origin, scene.certificates, LOGIN_POLL_PATH
+                scene.origin, scene.certificates, LOGIN_POLL_PATH, browser=self.browser
             )
             if status == 200:
                 value = _issued_value(headers)
@@ -2416,7 +2257,9 @@ class _DaemonRepair:
         wait: float = 30.0,
         budget: float = 10.0,
         reopen: bool = False,
-        reports: bool = True,
+        marker: bool = True,
+        second_login: bool = True,
+        reopen_wall: bool = False,
         start_fails: bool = False,
     ) -> None:
         self.row = row
@@ -2427,10 +2270,14 @@ class _DaemonRepair:
         self.cookie = staged.li_at
         served.accept_session(staged.li_at)
         self.wait, self.budget, self.reopen = wait, budget, reopen
-        #: The owner tells the second host its read waits for the profile, as
-        #: the product's middleware does. The second frontend beats for its
-        #: call either way, as the product's does from before its lookup.
-        self.reports = reports
+        #: The owner marks the second read too, from its latch; without it the
+        #: second read waits at the owner until the first login is over.
+        self.marker = marker
+        #: The second frontend's login opens its wall, in a browser of its own.
+        self.second_login = second_login
+        #: The first login's browser reloads its wall and opens a second tab
+        #: once the second host started.
+        self.reopen_wall = reopen_wall
         #: After the close, the owner's browser does not start again.
         self.start_fails = start_fails
         self.closed = False
@@ -2438,7 +2285,6 @@ class _DaemonRepair:
         self.owner_lines: list[str] = []
         self.host_lines: list[str] = []
         self.second_lines: list[str] = []
-        self.second_progress: list[dict[str, Any]] = []
         self.calls: list[dict[str, Any]] = []
         self.record: dict[str, Any] = {
             "row": row,
@@ -2453,7 +2299,6 @@ class _DaemonRepair:
             snapshot=self._snapshot,
             browser_gone=self._browser_gone,
             second_host=self._second_host,
-            second_progress=lambda: list(self.second_progress),
             owner_reading=self._owner_reading,
             owner_log=lambda: list(self.owner_lines),
             host_output=lambda: list(self.host_lines),
@@ -2554,25 +2399,41 @@ class _DaemonRepair:
         return record
 
     async def _second_host(self) -> dict[str, Any]:
-        """A second frontend, as the product's meets the repair: its call
-        waits at the owner for the profile the first frontend's login holds,
-        the owner saying so to its host (heard by the harness's own
-        recorder) and its frontend beating for it, and once that login let
-        go, it reads with the session the login left."""
+        """A second frontend, as the product's meets the repair: the owner
+        marks its read from its latch, its frontend opens a login of its own
+        in an empty profile, which asks and is never issued, and once the
+        first login published, that login ends on its session and the
+        frontend runs its read again with it."""
         launched = time.monotonic_ns()
         began = time.monotonic_ns()
-        heard = harness.progress_recorder(self.second_progress)
         if self.reopen:
             # The owner opening a browser on the stale generation.
             await self._feed(self.staged.li_at)
-        assert self.login is not None
-        if self.reports and self.login.thread.is_alive():
-            await heard(0, 100, _HAND_OVER)
-        while self.login.thread.is_alive():
-            self.second_lines.append(
-                f'INFO HTTP Request: POST http://[::1]:1{HEARTBEAT_PATH} "200 OK"'
-            )
+        login = self.login
+        assert login is not None
+        if self.reopen_wall:
+            for _ in range(2):
+                await asyncio.to_thread(login.open_again)
+        browser: str | None = None
+        if self.marker:
+            self._mark()
+            if self.second_login:
+                _, opened, _ = await asyncio.to_thread(
+                    _exchange, self.origin, self.certificates, LOGIN_PATH
+                )
+                browser = _browser_name(opened)
+        while login.thread.is_alive():
+            if browser is not None:
+                await asyncio.to_thread(
+                    _exchange,
+                    self.origin,
+                    self.certificates,
+                    LOGIN_POLL_PATH,
+                    browser=browser,
+                )
             await asyncio.sleep(0.05)
+        if self.marker and login.outcome == COMPLETED:
+            self.second_lines += ["INFO The sign-in finished", f"INFO {REPLAY_LINE}"]
         post = await self._feed(self.cookie) == 200
         return {
             "made": True,
@@ -2581,7 +2442,7 @@ class _DaemonRepair:
             "forwarded": True,
             "quit_problems": [],
             "lines": auth_repair._flags(self.second_lines),
-            "progress": list(self.second_progress),
+            "progress": [],
         }
 
     def finish_record(self) -> dict[str, Any]:
@@ -2637,22 +2498,25 @@ async def test_the_owner_s_marker_is_repaired_and_replayed_once(
     assert repair_reading(record)["at_read_end"] == COMPLETED
 
 
-async def test_a_second_frontend_waits_out_the_login_and_ends_on_its_session(
+async def test_a_second_frontend_signs_in_beside_the_first_and_ends_on_its_session(
     on_disk,
     served,
     ca,
 ):
     record = await _daemon_row(ROW_SECOND, on_disk, served, ca)
+    login = record["login"]
 
     assert repair_problems(record, daemon=True) == []
-    assert record["marks"] == 1 and len(record["login"]["issued"]) == 1
-    # Released only once the owner said the second read waits for the
-    # profile, and the first frontend's login seen over after it.
-    waiting = auth_repair.profile_wait_started(record["second"]["progress"])
-    assert waiting is not None and waiting <= record["login"]["released_ns"]
-    assert record["login_over_ns"] >= record["login"]["released_ns"]
+    assert record["marks"] == 2
+    # Released to the first login's browser once the second one's wall was
+    # served; the second login asked and was never issued.
+    opened = auth_repair.second_login_opened(login, record["second"]["launched_ns"])
+    assert opened is not None and opened <= login["released_ns"]
+    assert login["released_browser"] == 1
+    assert [item["browser"] for item in login["issued"]] == [1]
+    assert login["answers"]["pending"] > 0
     assert semantics(record)["second"] is True
-    assert semantics(record)["second_met"] == auth_repair.MET_PROFILE
+    assert semantics(record)["second_met"] == auth_repair.MET_MARKER
 
 
 @pytest.mark.parametrize("row", [ROW_COLD, ROW_SECOND])
@@ -2671,129 +2535,41 @@ async def test_an_owner_whose_browser_never_starts_again_fails_the_row(
     ]
 
 
-async def test_a_second_read_its_frontend_beats_for_alone_leaves_the_cell_invalid(
+async def test_the_first_browser_reopening_its_wall_never_releases_the_row(
     on_disk, served, ca, monkeypatch
 ):
-    """The reviewer's case: the second frontend beats for its call, as the
-    product's does before its tool lookup and session reach the owner, and
-    the owner never says the read waits for the profile. The row does not
-    release on the beats, and the cell is invalid, never a finding."""
-    monkeypatch.setattr(auth_repair, "SECOND_WAITING_SECONDS", 0.5)
-    record = await _daemon_row(ROW_SECOND, on_disk, served, ca, reports=False)
+    """The negative control: after the second host started, the first
+    login's browser reloads its wall and opens it in a second tab, and the
+    second frontend's login never opens its own. The row does not release on
+    the first browser's pages, and the cell is invalid, never a finding."""
+    monkeypatch.setattr(auth_repair, "SECOND_LOGIN_SECONDS", 0.5)
+    record = await _daemon_row(
+        ROW_SECOND, on_disk, served, ca, second_login=False, reopen_wall=True
+    )
     problems = repair_problems(record, daemon=True)
+    login = record["login"]
+    launched = record["second"]["launched_ns"]
 
+    assert [page["browser"] for page in login["login_pages"]] == [1, 1, 1]
+    assert all(page["at_ns"] >= launched for page in login["login_pages"][1:])
     # Released anyway, so the login still ends inside its own budget, but
-    # only once the whole bound had passed with nothing from the owner.
-    released = record["login"]["released_ns"]
-    assert released is not None
-    assert released - record["first_ask_ns"] >= 0.5e9
-    assert invalid_evidence(problems) == [_NOT_WAITING]
+    # only once the whole bound had passed with no other browser's wall.
+    assert login["released_ns"] - launched >= 0.5e9
+    assert invalid_evidence(problems) == [_NOT_OPENED]
     assert _findings(problems) == []
 
 
-async def test_only_the_owner_s_wait_for_the_profile_shows_the_second_read_there(
-    tmp_path, monkeypatch
+async def test_a_second_read_that_waited_at_the_owner_is_the_product_s_finding(
+    on_disk, served, ca, monkeypatch
 ):
-    """The reviewer's heartbeat probe, as a regression on the real path: the
-    production frontend, its heartbeat middleware and its proxy, an owner
-    running the real serializing middleware, and a host client heard by the
-    harness's own recorder in the harness's own mode. Only the sockets, the
-    heartbeat's reply and the profile lease the login holds are stood in.
+    """The serialised owner: no marker reaches the second read, which waits
+    until the first login is over, so no second login ever opens."""
+    monkeypatch.setattr(auth_repair, "SECOND_LOGIN_SECONDS", 0.5)
+    record = await _daemon_row(ROW_SECOND, on_disk, served, ca, marker=False)
+    problems = repair_problems(record, daemon=True)
 
-    While the owner holds the frontend's fresh tool lookup, the frontend
-    beats twice and the owner has run nothing: not waiting. While the
-    owner's own lock is taken, it reports the call queued: still not
-    waiting. Only its report of the wait for the profile is, with its tool
-    still not run; once the login lets go, the read is answered."""
-    import httpx2
-    from fastmcp import Client, FastMCP
-    from fastmcp.server.middleware import Middleware
-    from test_daemon_proxy import _attachment, _backend, _reach_owners_in_process
-
-    from linkedin_mcp_server import sequential_tool_middleware as sequential
-    from linkedin_mcp_server.daemon.proxy import FrontendCallHeartbeatMiddleware
-    from linkedin_mcp_server.server import create_mcp_server
-    from linkedin_mcp_server.server_role import ServerRole
-
-    listing, listed, let_go = asyncio.Event(), asyncio.Event(), asyncio.Event()
-    ran: list[str] = []
-    beats: list[str] = []
-
-    class HoldTheLookup(Middleware):
-        async def on_list_tools(self, context: Any, call_next: Any) -> Any:
-            listing.set()
-            await listed.wait()
-            return await call_next(context)
-
-    class HeldByTheLogin:
-        """The profile as the first frontend's login holds it: taken in
-        another process, handed over once that login lets go."""
-
-        def try_acquire(self) -> bool:
-            return False
-
-        async def acquire(self, timeout: float) -> bool:
-            try:
-                await asyncio.wait_for(let_go.wait(), timeout)
-            except TimeoutError:
-                return False
-            return True
-
-        def release(self) -> None:
-            pass
-
-    serializing = sequential.SequentialToolExecutionMiddleware()
-    owner = FastMCP("owner")
-    owner.add_middleware(HoldTheLookup())
-    owner.add_middleware(serializing)
-
-    @owner.tool(name=harness.READ_TOOL)
-    def read(num_posts: int = 1) -> dict:
-        ran.append(harness.READ_TOOL)
-        return {"sections": {"feed": harness.POST_MARKER}}
-
-    async def beat(_attachment: Any, call_id: str) -> httpx2.Response:
-        beats.append(call_id)
-        return httpx2.Response(200, json={"watched": False})
-
-    monkeypatch.setattr(sequential, "get_profile_lease", HeldByTheLogin)
-    _reach_owners_in_process(monkeypatch, lambda _url: owner)
-    monkeypatch.setattr(FrontendCallHeartbeatMiddleware, "_beat", staticmethod(beat))
-    frontend = create_mcp_server(
-        role=ServerRole.PROXY,
-        proxy_backend=_backend(_attachment(tmp_path), tmp_path),
-        tool_timeout=30.0,
-    )
-    progress: list[dict[str, Any]] = []
-    seams = cast(Any, SimpleNamespace(second_progress=lambda: list(progress)))
-    waiting = auth_repair._second_waiting
-
-    async with Client(
-        frontend, mode="legacy", progress_handler=harness.progress_recorder(progress)
-    ) as client:
-        pending = asyncio.ensure_future(
-            client.call_tool_mcp(harness.READ_TOOL, dict(auth_repair.READ_ARGUMENTS))
-        )
-        try:
-            await asyncio.wait_for(listing.wait(), 10)
-            assert await auth_repair._until(lambda: len(beats) >= 2, 10)
-            assert not waiting(seams, pending)
-            assert ran == [] and progress == []
-            async with serializing._lock:
-                listed.set()
-                assert await auth_repair._until(lambda: progress, 10)
-                await asyncio.sleep(0.2)
-                assert not waiting(seams, pending)
-            assert await auth_repair._until(lambda: waiting(seams, pending), 10)
-            assert ran == []
-            assert progress[-1]["message"] == _HAND_OVER
-            let_go.set()
-            result = await asyncio.wait_for(pending, 10)
-        finally:
-            pending.cancel()
-
-    assert ran == [harness.READ_TOOL]
-    assert harness.tool_summary(result)["read_the_post"] is True
+    assert _findings(problems) == [_NO_MARKER]
+    assert invalid_evidence(problems) == []
 
 
 #: A stdio server standing in for the second frontend: its read reports the
@@ -2841,9 +2617,8 @@ async def test_a_second_host_keeps_the_progress_its_client_heard_during_the_read
     assert spawned and harness.host_failures(session) == []
     call = found["call"]
     assert call["read_the_post"] is True
-    heard = auth_repair.profile_wait_started(found["progress"])
-    assert heard is not None
-    assert call["began_monotonic_ns"] <= heard <= call["ended_monotonic_ns"]
+    [heard] = [item for item in found["progress"] if item["message"] == _HAND_OVER]
+    assert call["began_monotonic_ns"] <= heard["seen_ns"] <= call["ended_monotonic_ns"]
 
 
 async def test_an_owner_reopening_on_the_stale_generation_fails_the_second_frontend(

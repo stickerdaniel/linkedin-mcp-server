@@ -843,7 +843,7 @@ def get_bootstrap_state() -> BootstrapState:
     return _state
 
 
-def bootstrap_observation() -> dict[str, str | bool]:
+def bootstrap_observation(*, stored: bool) -> dict[str, str | bool]:
     from linkedin_mcp_server.core.exceptions import AccountRestrictedError
 
     setup = _state.setup_state.value
@@ -865,6 +865,16 @@ def bootstrap_observation() -> dict[str, str | bool]:
             login = "failed" if error is not None else "auth_ready"
             if error is not None:
                 restricted = isinstance(error, AccountRestrictedError)
+    # A login that stood down for a peer, or a session another process logged
+    # out since, leaves nothing on disk; a task's success alone is no session.
+    # *stored* is the caller's one read of the files, so the two fields of a
+    # status cannot disagree.
+    if login == AuthState.READY.value and not stored:
+        login = (
+            AuthState.FAILED.value
+            if task is not None and task.done()
+            else AuthState.IDLE.value
+        )
 
     imported = "not_started"
     import_task = _state.import_task
@@ -3951,8 +3961,15 @@ async def _refresh_background_task_state() -> None:
             _state.account_restricted = isinstance(exc, AccountRestrictedError)
             logger.warning("LinkedIn login bootstrap failed: %s", exc)
         else:
-            _state.auth_state = AuthState.READY
-            _state.auth_completed_at = utcnow_iso()
+            # Success is the session on disk now. A login that stood down for a
+            # peer reports success too, and a logout since can have removed
+            # what that peer published.
+            if _auth_ready():
+                _state.auth_state = AuthState.READY
+                _state.auth_completed_at = utcnow_iso()
+            else:
+                _state.auth_state = AuthState.FAILED
+                _state.last_error = "No LinkedIn session is available; sign in again."
 
     # Read from the finished import itself, not only from whichever caller
     # awaited it: a poller that sees the import done, or runs after that caller
@@ -4439,7 +4456,6 @@ async def _start_login_if_needed(
                 prior_error = None
             else:
                 prior_error = _state.last_error
-                _move_invalid_auth_state_aside(superseded_by)
                 _state.auth_state = AuthState.STARTING
                 _state.auth_started_at = utcnow_iso()
                 _state.last_error = None
@@ -4796,12 +4812,12 @@ async def invalidate_auth_and_trigger_relogin(
         # for 1.5 seconds, this raised "the browser profile is in use" and the
         # 60-second wait was never reached.
         #
-        # The rotation itself is not lost. `interactive_login` rotates under the
-        # profile it waited for (`setup.py`, `rotate_shielded`), which is the
-        # better place for it anyway: this one runs without holding anything, so
-        # its result was never guaranteed to survive to the login. What is lost by
-        # skipping it is only that `_auth_ready()` keeps reporting the dead
-        # session until the login retires it. On a shared owner the quiescence
+        # The rotation itself is not lost. The login's promotion rotates under
+        # the source lease (`login_attempt.promote`), which is the better place
+        # for it anyway: this one runs without holding anything, so its result
+        # was never guaranteed to survive to the login. What is lost by skipping
+        # it is only that `_auth_ready()` keeps reporting the dead session until
+        # the login retires it. On a shared owner the quiescence
         # latch closes that window. On a single-process server nothing does, and
         # it does not need to: the same call is already committed to starting a
         # login, and the login retires the state itself once it holds the
@@ -4892,12 +4908,6 @@ def _force_move_auth_state_aside(
 ) -> None:
     """Move auth artifacts aside unconditionally (no ``_auth_ready()`` guard)."""
     _move_auth_state_aside(force=True, superseded_by=superseded_by)
-
-
-def _move_invalid_auth_state_aside(
-    superseded_by: str | None | object = UNGUARDED,
-) -> None:
-    _move_auth_state_aside(force=False, superseded_by=superseded_by)
 
 
 async def _run_login_flow() -> None:

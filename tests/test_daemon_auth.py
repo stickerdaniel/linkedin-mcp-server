@@ -557,7 +557,6 @@ class TestTheRepairRunsForReal:
             "linkedin_mcp_server.bootstrap",
             _run_login_flow=AsyncMock(side_effect=login),
             _force_move_auth_state_aside=lambda *a, **k: None,
-            _move_invalid_auth_state_aside=lambda *a, **k: None,
             _auto_import_allowed=lambda *a, **k: False,
             # A login that succeeded has written a session; one that failed has
             # not. This is what the wait reads to decide whether to replay.

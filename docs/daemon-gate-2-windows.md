@@ -277,7 +277,7 @@ $Flags = "--daemon", "--log-level", "INFO"
    owner logs the stand-down line and exits, then the session is cleared.
 3. **Login.** `Server --login` to sign in again, then start Desktop, read and
    quit. `Server @Flags --login`, answer `y`, sign in. Expected: the owner
-   retires before the login opens the profile, and `Server --status` is valid
+   retires before the login starts, and `Server --status` is valid
    afterwards.
 4. **Busy owner.** With a slow read in flight in Desktop, run
    `Server @Flags --logout`, `Server @Flags --login` and
