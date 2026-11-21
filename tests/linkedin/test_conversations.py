@@ -1645,7 +1645,9 @@ class TestSearchConversations:
         ):
             result = await reader.search_conversations("Jacki")
 
-        mock_refs.assert_awaited_once_with(limit=20, context="search_results")
+        mock_refs.assert_awaited_once_with(
+            limit=20, context="search_results", rows_attached=True
+        )
         assert result["references"]["search_results"] == [
             first,
             duplicate,
@@ -1751,6 +1753,78 @@ class TestSearchConversations:
                     "error_message": _stopped_message("Bob", started=True),
                 }
             },
+        }
+
+    async def test_the_text_is_read_after_the_result_rows_attach(self, mock_page):
+        """The empty state LinkedIn paints first is not the search's answer.
+
+        It alone fills main past the text threshold, so a read that does not
+        wait for the rows returns "no messages" for a search whose rows then
+        attach and get clicked (#703). Here the rows attach only once their
+        wait runs, the way they arrive a moment after the empty state.
+        """
+        reader = _reader(mock_page)
+        page_state = {"rows": False}
+
+        async def rows_attach(*_args: Any, **_kwargs: Any) -> None:
+            page_state["rows"] = True
+
+        async def read_main(_roots: list[str]) -> dict[str, Any]:
+            if page_state["rows"]:
+                return _root("Ada Lovelace\nSee you on Tuesday")
+            return _root("No messages yet! Reach out and start a conversation")
+
+        mock_page.wait_for_selector = AsyncMock(side_effect=rows_attach)
+        with (
+            patch.object(PageNavigator, "_navigate_to_page", new_callable=AsyncMock),
+            patch.object(reader, "_wait_for_main_text", new_callable=AsyncMock),
+            patch.object(
+                PageContentReader, "_extract_root_content", side_effect=read_main
+            ),
+            patch.object(
+                reader,
+                "_extract_conversation_thread_refs",
+                new_callable=AsyncMock,
+                return_value=_scan(),
+            ),
+        ):
+            result = await reader.search_conversations("Ada")
+
+        assert result["sections"] == {
+            "search_results": "Ada Lovelace\nSee you on Tuesday"
+        }
+
+    async def test_a_search_without_rows_waits_for_them_once(self, mock_page):
+        """The text and the scan share one row wait.
+
+        A search that matches nothing never attaches a row, and each wait for
+        one runs to its full timeout. Waiting before the text and again in the
+        scan would make every empty search ten seconds slower than before.
+        """
+        from patchright.async_api import TimeoutError as PlaywrightTimeoutError
+
+        reader = _reader(mock_page)
+        mock_page.wait_for_selector = AsyncMock(
+            side_effect=PlaywrightTimeoutError("no rows")
+        )
+        mock_page.evaluate = AsyncMock(return_value=_outcome())
+        with (
+            patch.object(PageNavigator, "_navigate_to_page", new_callable=AsyncMock),
+            patch.object(reader, "_wait_for_main_text", new_callable=AsyncMock),
+            patch.object(
+                PageContentReader,
+                "_extract_root_content",
+                new_callable=AsyncMock,
+                return_value=_root("No messages yet!"),
+            ),
+        ):
+            result = await reader.search_conversations("nobody")
+
+        assert mock_page.wait_for_selector.await_count == 1
+        mock_page.evaluate.assert_not_awaited()
+        assert result == {
+            "url": mock_page.url,
+            "sections": {"search_results": "No messages yet!"},
         }
 
     async def test_a_search_whose_rows_never_attach_adds_no_diagnostic(self, mock_page):
