@@ -13,7 +13,10 @@ import re
 
 import anyio
 import anyio.lowlevel
-from patchright.async_api import TimeoutError as PlaywrightTimeoutError
+from patchright.async_api import (
+    Error as PlaywrightError,
+    TimeoutError as PlaywrightTimeoutError,
+)
 
 from linkedin_mcp_server.core.exceptions import (
     InvalidReferenceError,
@@ -64,6 +67,54 @@ def strip_select_conversation_prefix(aria_label: str) -> str:
 # pathname unchanged, so it cannot be verified. Measured 2026-09-25, see
 # docs/decisions/2026-09-25-fail-closed-thread-attribution.md.
 _COMPOSE_URL = "https://www.linkedin.com/messaging/compose/"
+
+# The zone the page renders message times in. LinkedIn writes them as bare
+# clock and day strings ("2:23 PM", "TUESDAY", "SEP 4") in the browser's zone,
+# which is whatever the host or container runs in: the browser is never given
+# one, by the rule against injected fingerprints. Read from the page, so it is
+# the zone those strings were rendered in rather than the server process's own
+# (#1195).
+# ``0 -`` rather than unary minus: a zero offset negated is -0, which crosses
+# into Python as the float -0.0 rather than the int 0.
+_PAGE_TIME_ZONE_JS = r"""() => ({
+    id: Intl.DateTimeFormat().resolvedOptions().timeZone || null,
+    offsetMinutes: 0 - new Date().getTimezoneOffset(),
+})"""
+
+# Real zones sit between UTC-12:00 and UTC+14:00; anything outside a day is
+# not an offset at all.
+_MAX_OFFSET_MINUTES = 24 * 60
+
+
+def _time_zone_from_page(raw: Any) -> dict[str, str] | None:
+    """``{id?, utc_offset}`` from the page's answer, or None when unusable.
+
+    ``utc_offset`` is the zone's offset at the moment of the read, written
+    ``+HH:MM``. ``id`` is the IANA name, kept whenever the page gave one,
+    because only the name converts a time from the other side of a daylight
+    saving change. It is the name Chromium reports, which can be an older link
+    of the same zone: measured, ``Asia/Kolkata`` reads back as
+    ``Asia/Calcutta``, and the time zone database resolves either.
+    """
+    if not isinstance(raw, dict):
+        return None
+    offset = raw.get("offsetMinutes")
+    # A JavaScript number may cross as a float; a whole one is still minutes.
+    if isinstance(offset, float) and offset.is_integer():
+        offset = int(offset)
+    if (
+        not isinstance(offset, int)
+        or isinstance(offset, bool)
+        or abs(offset) >= _MAX_OFFSET_MINUTES
+    ):
+        return None
+    hours, minutes = divmod(abs(offset), 60)
+    zone = {"utc_offset": f"{'-' if offset < 0 else '+'}{hours:02d}:{minutes:02d}"}
+    zone_id = raw.get("id")
+    if isinstance(zone_id, str) and zone_id:
+        zone = {"id": zone_id, **zone}
+    return zone
+
 
 _SCAN_STARTED_ON_THREAD = (
     " The scan began on a thread path. An unchanged pre-click thread ID was"
@@ -651,6 +702,25 @@ class ConversationReader:
                 result["references"] = {section_name: references}
         return result
 
+    async def _add_time_zone(self, result: dict[str, Any]) -> dict[str, Any]:
+        """Name the zone of the times in *result*'s text, when it has text.
+
+        A result without text has no times to describe. A browser error
+        leaves the key out rather than failing a read that succeeded; a page
+        that has left LinkedIn still raises, as it does for every read.
+        """
+        if not result.get("sections"):
+            return result
+        try:
+            raw = await self._session.run_on_linkedin(_PAGE_TIME_ZONE_JS)
+        except PlaywrightError:
+            logger.debug("Could not read the page's time zone", exc_info=True)
+            return result
+        zone = _time_zone_from_page(raw)
+        if zone is not None:
+            result["time_zone"] = zone
+        return result
+
     async def _wait_for_main_text(
         self,
         *,
@@ -1070,7 +1140,7 @@ class ConversationReader:
         )
         if section_errors:
             result["section_errors"] = section_errors
-        return result
+        return await self._add_time_zone(result)
 
     async def get_conversation(
         self,
@@ -1127,11 +1197,13 @@ class ConversationReader:
             if cleaned
             else []
         )
-        return self._single_section_result(
-            self._session.page.url,
-            "conversation",
-            cleaned,
-            references=references,
+        return await self._add_time_zone(
+            self._single_section_result(
+                self._session.page.url,
+                "conversation",
+                cleaned,
+                references=references,
+            )
         )
 
     async def search_conversations(
@@ -1189,7 +1261,7 @@ class ConversationReader:
         )
         if section_errors:
             result["section_errors"] = section_errors
-        return result
+        return await self._add_time_zone(result)
 
     async def archive_conversation(self, thread_id: str) -> dict[str, Any]:
         """Archive one messaging thread from its own options menu.

@@ -707,6 +707,7 @@ def semantic_program_id(program: str) -> str:
         ("const heading = document.querySelector('main h1')", "profile_display_name"),
         ("main li label[aria-label]", "conversation_thread_refs"),
         ("isScrollable", "scroll_main_region"),
+        ("resolvedOptions().timeZone", "page_time_zone"),
         ("jobs-search-pagination__page-state", "job_total_pages"),
         ("artdeco-pagination__pages", "saved_job_total_pages"),
         ("document.body?.innerText", "body_marker"),
