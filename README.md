@@ -239,18 +239,12 @@ Any other `--host` needs a token: set `LINKEDIN_MCP_HTTP_TOKEN` or pass `--http-
 
 Runtime server logs are emitted by FastMCP/Uvicorn.
 
-Tool calls are serialized to protect the shared LinkedIn browser session, both
-within one server process and across separate ones. If you run several MCP
-clients at once, each starts its own server process, and only one of them uses
-the browser at a time; the others wait briefly and take over as soon as it
-finishes a call. A client that waits too long gets a "browser is busy" message
-and can simply retry. Use `--log-level DEBUG` to see the wait/acquire/release
-logs.
+Several MCP clients can run at once and share one LinkedIn session. If one gets
+a "browser is busy" message, retry. The first client to sign in signs in all of
+them.
 
-This covers processes on the same machine and in the same runtime. It does not
-extend between the host and a Docker container sharing the same
-`~/.linkedin-mcp` directory, so do not run `--login` or `--logout` on the host
-while a container is running.
+Do not run `--login` or `--logout` on the host while a Docker container uses the
+same `~/.linkedin-mcp` directory.
 
 **Test with mcp inspector:**
 

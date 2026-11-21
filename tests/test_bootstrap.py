@@ -9984,10 +9984,6 @@ class TestAnOwnerNeverSignsInItself:
 
         config = _auto_import_config(flag=False, is_interactive=True)
         monkeypatch.setattr("linkedin_mcp_server.bootstrap.get_config", lambda: config)
-        monkeypatch.setattr(
-            "linkedin_mcp_server.bootstrap._move_invalid_auth_state_aside",
-            MagicMock(),
-        )
         login_flow = AsyncMock()
         monkeypatch.setattr("linkedin_mcp_server.bootstrap._run_login_flow", login_flow)
 

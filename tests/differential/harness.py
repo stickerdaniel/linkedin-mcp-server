@@ -6673,6 +6673,13 @@ class CommandSeams:
     scratch: Path
 
 
+class Release(Protocol):
+    """``AuthSeams.release``: issue from now on, to *browser* alone when it
+    is given (``SyntheticOrigin.release_login``)."""
+
+    def __call__(self, *, browser: int | None = None) -> dict[str, Any]: ...
+
+
 @dataclass(frozen=True)
 class AuthSeams:
     """What a row that stages a sign-in may do (``RowContext.auth``).
@@ -6682,11 +6689,12 @@ class AuthSeams:
     the staged session, which is the row's authorization
     (``ORIGIN_REJECTED``); ``authorize``, a user action the row confirms
     (``LOGIN``, ``IMPORT``) recorded before the command it starts; and
-    ``release``, which lets the login's next ask issue a fresh session. Each
-    authorization is read back with the session right after it, which is
-    what shows it came before anything invalidated the original. The
-    teardown closes the sign-in, so nothing still asking after the row can
-    complete. Every reading waits and sends nothing, and none raises.
+    ``release``, which lets the login's next ask issue a fresh session, or
+    only the asks of the one browser it names. Each authorization is read
+    back with the session right after it, which is what shows it came before
+    anything invalidated the original. The teardown closes the sign-in, so
+    nothing still asking after the row can complete. Every reading waits and
+    sends nothing, and none raises.
     """
 
     #: Reject every session the origin accepted; the record, with the
@@ -6696,7 +6704,7 @@ class AuthSeams:
     #: session read right after.
     authorize: Callable[[str], dict[str, Any]]
     #: Let the next completion asks issue fresh sessions.
-    release: Callable[[], dict[str, Any]]
+    release: Release
     #: The sign-in's record so far (``SyntheticOrigin.login_record``).
     login: Callable[[], dict[str, Any]]
     #: The session's artefacts now, read from disk alone, labelled.
@@ -6706,9 +6714,6 @@ class AuthSeams:
     #: A second host with the row's own command and environment, one read of
     #: the feed and a normal quit, its lines its own (``LossSeams.fresh_read``).
     second_host: Callable[[], Awaitable[dict[str, Any]]]
-    #: The progress the latest second host's client heard for its read so
-    #: far, while it runs (``progress_recorder``).
-    second_progress: Callable[[], list[dict[str, Any]]]
     #: Which owner the descriptor names now (``LossSeams.owner_reading``).
     owner_reading: Callable[[str], Awaitable[dict[str, Any]]]
     #: The row's own daemon log, as written so far; every owner's.
@@ -9383,8 +9388,6 @@ async def measure_host_quit_row(
     authorizations: list[Authorization] = []
     #: The second hosts the row ran; each server held until it is gone.
     second_hosts: list[HostSession] = []
-    #: Each second host's progress as its client hears it, the latest last.
-    second_progress: list[list[dict[str, Any]]] = []
 
     def auth_snapshot(label: str) -> dict[str, Any]:
         """``AuthSeams.snapshot``: the artefacts alone, stamped when read."""
@@ -9434,9 +9437,9 @@ async def measure_host_quit_row(
             return {"kind": kind, "recorded": False}
         return authorize_now(kind, time.monotonic_ns())
 
-    def auth_release() -> dict[str, Any]:
+    def auth_release(*, browser: int | None = None) -> dict[str, Any]:
         """``AuthSeams.release``: the row's, in the row's phase."""
-        found = origin.release_login()
+        found = origin.release_login(browser=browser)
         emit("origin", "login.released", **found)
         return found
 
@@ -9495,7 +9498,6 @@ async def measure_host_quit_row(
         directory.mkdir(exist_ok=True)
         held: list[Retained] = []
         progress: list[dict[str, Any]] = []
-        second_progress.append(progress)
 
         def hold(process: Any) -> None:
             held.append(
@@ -9585,9 +9587,6 @@ async def measure_host_quit_row(
             snapshot=auth_snapshot,
             browser_gone=race_browser_gone,
             second_host=auth_second_host,
-            second_progress=lambda: (
-                list(second_progress[-1]) if second_progress else []
-            ),
             owner_reading=loss_owner_reading,
             owner_log=loss_owner_log,
             host_output=lambda: list(host_lines),
