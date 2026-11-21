@@ -150,10 +150,14 @@ class FeedReader:
     async def extract_feed(
         self,
         num_posts: int = 10,
+        max_scrolls: int | None = None,
     ) -> ExtractedSection:
-        """Read the LinkedIn home feed, scrolling until *num_posts* are loaded."""
+        """Read the LinkedIn home feed, scrolling until *num_posts* are loaded.
+
+        *max_scrolls* caps the scroll loop; None keeps the default of 12.
+        """
         try:
-            return await self._extract_feed_once(num_posts)
+            return await self._extract_feed_once(num_posts, max_scrolls)
         except LinkedInOperationError:
             raise
         except Exception as e:
@@ -167,6 +171,7 @@ class FeedReader:
     async def _extract_feed_once(
         self,
         num_posts: int,
+        max_scrolls: int | None = None,
     ) -> ExtractedSection:
         """Single attempt: navigate, scroll until post count, extract."""
         url = "https://www.linkedin.com/feed/"
@@ -205,7 +210,7 @@ class FeedReader:
         page.on("response", _handle_response)
         try:
             return await self._extract_feed_body(
-                url, num_posts, captured_urls, pending_reads
+                url, num_posts, captured_urls, pending_reads, max_scrolls
             )
         finally:
             try:
@@ -229,6 +234,7 @@ class FeedReader:
         num_posts: int,
         captured_urls: list[str],
         pending_reads: list[asyncio.Task[None]],
+        max_scrolls: int | None = None,
     ) -> ExtractedSection:
         page = self._session.page
         await self._navigator._navigate_to_page(url)
@@ -266,7 +272,8 @@ class FeedReader:
         cx, cy = viewport["width"] // 2, viewport["height"] // 2
         await page.mouse.move(cx, cy)
 
-        for i in range(_MAX_SCROLLS):
+        scroll_limit = max_scrolls if max_scrolls is not None else _MAX_SCROLLS
+        for i in range(scroll_limit):
             count = len(captured_urls)
             logger.debug("Feed scroll %d: %d permalinks captured", i, count)
             if count >= num_posts:

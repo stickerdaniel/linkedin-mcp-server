@@ -38,6 +38,7 @@ def register_feed_tools(
     async def get_feed(
         ctx: Context,
         num_posts: Annotated[int, Field(ge=1, le=50)] = 10,
+        max_scrolls: Annotated[int, Field(ge=1, le=12)] | None = None,
     ) -> dict[str, Any]:
         """
         Get posts from the authenticated user's LinkedIn feed.
@@ -47,6 +48,10 @@ def register_feed_tools(
             num_posts: Number of posts to fetch (1-50, default 10).
                        Posts are loaded in batches of ~5 as the page scrolls,
                        so the actual count may slightly exceed the target.
+            max_scrolls: Maximum feed scrolls before returning what has loaded
+                (1-12). Default (None) uses 12. Each scroll can wait up to
+                ~12 s for a new batch, so a lower value returns sooner with
+                fewer posts.
 
         Returns:
             Dict with url, sections (name -> raw text), and optional keys:
@@ -65,13 +70,17 @@ def register_feed_tools(
             should parse sections["feed"] for post bodies.
         """
         extractor = await get_ready_extractor(ctx, tool_name="get_feed")
-        logger.info("Reading feed (num_posts=%d)", num_posts)
+        logger.info(
+            "Reading feed (num_posts=%d, max_scrolls=%s)", num_posts, max_scrolls
+        )
 
         await ctx.report_progress(
             progress=0, total=100, message="Reading the home feed"
         )
 
-        extracted = await extractor.extract_feed(num_posts=num_posts)
+        extracted = await extractor.extract_feed(
+            num_posts=num_posts, max_scrolls=max_scrolls
+        )
 
         url = "https://www.linkedin.com/feed/"
         sections: dict[str, str] = {}
