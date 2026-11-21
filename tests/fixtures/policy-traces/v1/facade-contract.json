@@ -98,7 +98,7 @@
       },
       "search_jobs": {
         "coroutine": true,
-        "signature": "(self, keywords: 'str', location: 'str | None' = None, max_pages: 'int' = 3, date_posted: 'str | None' = None, job_type: 'str | None' = None, experience_level: 'str | None' = None, work_type: 'str | None' = None, easy_apply: 'bool' = False, sort_by: 'str | None' = None, tool_timeout: 'float' = 180.0) -> 'dict[str, Any]'"
+        "signature": "(self, keywords: 'str', location: 'str | None' = None, max_pages: 'int' = 3, date_posted: 'str | None' = None, job_type: 'str | None' = None, experience_level: 'str | None' = None, work_type: 'str | None' = None, easy_apply: 'bool' = False, sort_by: 'str | None' = None, tool_timeout: 'float' = 180.0, start: 'int' = 0) -> 'dict[str, Any]'"
       },
       "search_people": {
         "coroutine": true,
@@ -747,6 +747,12 @@
               ],
               "default": null,
               "description": "Sort results (date, relevance). Classic search only."
+            },
+            "start": {
+              "default": 0,
+              "description": "Result offset to begin at (default 0). Pass a previous\ncall's pagination.next_offset, with the same search\narguments, to continue where it stopped. Results can shift\nbetween calls, so a continuation may repeat a job id.",
+              "minimum": 0,
+              "type": "integer"
             },
             "work_type": {
               "anyOf": [
