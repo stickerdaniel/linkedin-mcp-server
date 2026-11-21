@@ -485,6 +485,7 @@ class LoginAttempt:
             # client's fresh session in place.
             if not _session_stored():
                 self.outcome = "failed"
+                self.reason = "No LinkedIn session was saved. Sign in again."
             else:
                 self.outcome = (
                     "signed_in" if self._opened_a_browser else "repaired_by_peer"
@@ -530,7 +531,7 @@ def _session_stored() -> bool:
 
     try:
         return _auth_ready()
-    except UnicodeDecodeError:
+    except (OSError, UnicodeDecodeError):
         return False
 
 

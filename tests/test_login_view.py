@@ -475,13 +475,22 @@ class TestAttempt:
         assert peer.state == "repaired_by_peer"
         assert cancelled.state == "cancelled"
 
-    @pytest.mark.parametrize("stored", ["nothing", "undecodable state"])
+    @pytest.mark.parametrize(
+        "stored", ["nothing", "undecodable state", "unreadable profile"]
+    )
     async def test_a_login_that_returns_without_a_stored_session_failed(
-        self, isolate_profile_dir: Path, stored: str
+        self, isolate_profile_dir: Path, stored: str, monkeypatch: pytest.MonkeyPatch
     ):
         if stored == "undecodable state":
             _make_auth_ready(isolate_profile_dir)
             source_state_path(isolate_profile_dir).write_bytes(b"\xff")
+        if stored == "unreadable profile":
+            _make_auth_ready(isolate_profile_dir)
+
+            def unreadable() -> bool:
+                raise PermissionError("profile")
+
+            monkeypatch.setattr("linkedin_mcp_server.bootstrap._auth_ready", unreadable)
         page, context = FakePage(), FakeContext()
         browser = SimpleNamespace(page=page, context=context)
 
@@ -493,8 +502,11 @@ class TestAttempt:
         await opened.start(login(), name="opened")
         await peer.start(asyncio.sleep(0), name="peer")
 
-        assert opened.state == "failed"
-        assert peer.state == "failed"
+        for attempt in (opened, peer):
+            assert (attempt.state, attempt.reason) == (
+                "failed",
+                "No LinkedIn session was saved. Sign in again.",
+            )
 
     async def test_a_login_publishes_its_browser_only_while_it_holds_it(
         self, isolate_profile_dir: Path
