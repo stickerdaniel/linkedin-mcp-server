@@ -29,11 +29,11 @@ A Model Context Protocol (MCP) server that connects AI assistants to LinkedIn. A
 
 ## Quick Start
 
-The image ships full Chromium. Create the session directory first, so the container can save your session into it: `mkdir -p ~/.linkedin-mcp` (on Windows, `%USERPROFILE%\.linkedin-mcp`).
+The image ships full Chromium. Create the session directory first: `mkdir -p ~/.linkedin-mcp` (on Windows, `%USERPROFILE%\.linkedin-mcp`).
 
-**Sign in from the chat.** In Claude Desktop, and any other client that shows MCP Apps, a tool without a session asks the assistant to call `open_login`, which opens the LinkedIn sign-in inside the chat. Click and type in the page; Ctrl+V (Cmd+V on a Mac) pastes any text. No port is published for this.
+**Sign in from the chat.** In Claude Desktop and other clients that show MCP Apps, the LinkedIn sign-in opens inside the chat when a tool needs it. Ctrl+V (Cmd+V on a Mac) pastes.
 
-**Or sign in with the login viewer**, from any client: the container shows its login browser in your own browser tab.
+**Or use the login viewer**, which shows the login browser in your own browser tab.
 
 macOS / Linux:
 

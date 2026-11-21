@@ -464,17 +464,11 @@ Both run the latest server release. On the first tool call that needs authentica
 
 ### Authentication
 
-Create the session directory first, so the container can save your session into it:
+Create the session directory first: `mkdir -p ~/.linkedin-mcp` (on Windows, `%USERPROFILE%\.linkedin-mcp`).
 
-```bash
-mkdir -p ~/.linkedin-mcp
-```
+**Sign in from the chat.** In Claude Desktop and other clients that show MCP Apps, the LinkedIn sign-in opens inside the chat when a tool needs it. Ctrl+V (Cmd+V on a Mac) pastes.
 
-On Windows, create `%USERPROFILE%\.linkedin-mcp`.
-
-**Sign in from the chat.** Add the server to your MCP client as shown below and ask for something on LinkedIn. Without a session, the tool asks the assistant to call `open_login`. Claude Desktop, and any other client that shows MCP Apps, then opens the LinkedIn sign-in inside the chat. Click and type in the page; Ctrl+V (Cmd+V on a Mac) pastes any text, such as a password from your password manager. When the view says Signed in, the assistant retries the tool. No port is published for this. The sign-in stops with the server, also with `--login-timeout 0`.
-
-**Or sign in with the login viewer**, from any client or when the page in the chat does not work for your sign-in. The container opens a LinkedIn login browser that you drive from your own browser tab.
+**Or use the login viewer**, which shows the login browser in your own browser tab.
 
 macOS / Linux:
 
@@ -772,24 +766,16 @@ terminate HTTPS so the token never crosses the network in plain text.
 
 ## Sign in outside the chat
 
-1. Run the login viewer and open the link it prints:
+Run the login viewer, open the link it prints and sign in:
 
-   ```bash
-   docker run -it --rm \
-     -v ~/.linkedin-mcp:/home/pwuser/.linkedin-mcp \
-     -p 127.0.0.1:6080:6080 \
-     stickerdaniel/linkedin-mcp-server:latest --login --login-viewer
-   ```
+```bash
+docker run -it --rm \
+  -v ~/.linkedin-mcp:/home/pwuser/.linkedin-mcp \
+  -p 127.0.0.1:6080:6080 \
+  stickerdaniel/linkedin-mcp-server:latest --login --login-viewer
+```
 
-   Without Docker:
-
-   ```bash
-   uvx mcp-server-linkedin@latest --login
-   ```
-
-2. Ask the chat for your LinkedIn data again.
-
-If the login viewer reports that another client uses the browser, quit the MCP client once and run it again.
+Without Docker: `uvx mcp-server-linkedin@latest --login`.
 
 <br/>
 <br/>
