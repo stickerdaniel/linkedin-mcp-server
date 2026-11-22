@@ -12,7 +12,7 @@ from unittest.mock import patch
 from urllib.parse import quote
 
 import pytest
-from hypothesis import given, strategies as st
+from hypothesis import example, given, strategies as st
 from pydantic import ValidationError
 
 from linkedin_mcp_server import login_app, login_relay
@@ -53,13 +53,21 @@ setting_text = st.text(max_size=20) | st.from_regex(
 
 @pytest.mark.parametrize("name", SETTING_PARSERS)
 @given(raw=setting_text)
+@example(raw="")
+@example(raw=" \n")
 def test_a_setting_value_is_parsed_or_refused_as_a_setting_error(
     name: str, raw: str
 ) -> None:
+    if not raw.strip():
+        with pytest.raises(loaders.SettingError):
+            SETTING_PARSERS[name](raw)
+        return
     try:
-        SETTING_PARSERS[name](raw)
+        result = SETTING_PARSERS[name](raw)
     except loaders.SettingError:
-        pass
+        return
+
+    assert result is not None
 
 
 WELL_FORMED: dict[str, st.SearchStrategy[tuple[str, object]]] = {
@@ -261,10 +269,10 @@ def test_a_described_landing_names_the_origin_and_nothing_behind_it(
     if named is None:
         assert described == f"a {scheme}: document"
     else:
-        assert described in (
-            f"{scheme}://{named}{port}",
-            f"{scheme}://[{named}]{port}",
-        )
+        spellings = {f"{scheme}://{named}{port}"}
+        if ":" in named:
+            spellings.add(f"{scheme}://[{named}]{port}")
+        assert described in spellings
 
 
 @st.composite

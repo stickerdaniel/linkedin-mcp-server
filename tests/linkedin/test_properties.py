@@ -8,7 +8,7 @@ import unicodedata
 from urllib.parse import parse_qs, urlparse
 
 import pytest
-from hypothesis import given, strategies as st
+from hypothesis import example, given, strategies as st
 
 from linkedin_mcp_server.linkedin.contracts import (
     FilterValidationError,
@@ -376,6 +376,18 @@ POST_ANCHOR = "/feed/update/urn:li:activity:7000000000001/"
         max_size=10,
     ),
     captured=st.lists(post_path, max_size=70),
+)
+@example(
+    urns=[f"urn:li:activity:{7_000_000_000_000 + n}" for n in range(60)],
+    anchors=[POST_ANCHOR],
+    captured=[],
+)
+@example(
+    urns=[None],
+    anchors=[],
+    captured=[
+        f"/posts/ada_post-activity-{8_000_000_000_000 + n}-abcd" for n in range(60)
+    ],
 )
 def test_feed_references_are_the_rendered_posts_then_anchors_then_captures(
     urns: list[str | None], anchors: list[str], captured: list[str]
