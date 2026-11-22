@@ -174,9 +174,11 @@ def missing_description_section_error() -> dict[str, str]:
 
 
 # LinkedIn's offset stride in the search URL. It is NOT how many cards a
-# page renders: a live search served 11 per navigation while advertising 25
-# per page, so paging by this number skipped 13 of every 24 jobs. Only the
-# "are we past the last page" check may use it.
+# page renders: the classic `/jobs/search/` page served 10 or 11 per
+# navigation while advertising 25 per page, so paging by this number skipped
+# over half the jobs. The redesigned `/jobs/search-results/` page renders 25,
+# which matches the stride only by coincidence. Only the "are we past the
+# last page" check may use it.
 RESULTS_PER_LINKEDIN_PAGE = 25
 
 # The routes a job search may legitimately end on. `/jobs/search` is what the
