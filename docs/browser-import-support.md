@@ -100,9 +100,10 @@ measurements.
 
 Opera and Opera GX keep `Local State` at the user-data root (so the install gate
 `_has_local_state` works unchanged). Before Opera One they stored cookies at that
-root with no `Default/` subdir; Opera One uses the standard `Default/` subdir
-([#555](https://github.com/stickerdaniel/linkedin-mcp-server/issues/555)), and an
-upgraded install can hold both. The `layout="flat"` registry field drives
+root with no `Default/` subdir; Opera One uses the standard `Default/` subdir,
+as a Windows user reported on 2026-06-28 in
+[#555](https://github.com/stickerdaniel/linkedin-mcp-server/issues/555) (not
+checked against a local Opera One install). An upgraded install can hold both. The `layout="flat"` registry field drives
 `enumerate_profiles` to offer the root itself (`profile_dir_name "."`, so
 `root / "." == root`) ahead of the standard profiles, `resolve_cookies_db` finds
 `Network/Cookies` or `Cookies` in each, and the live session is picked by `li_at`
