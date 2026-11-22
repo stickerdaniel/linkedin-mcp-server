@@ -231,11 +231,9 @@ def sample_guardian_loss_progress(
         # read, so ask its retained handle again before stamping the lease.
         # A guardian seen gone here makes one consistent observation of exit
         # and acquisition, which is the claim; the kernel's order of the two
-        # was never sampled. A handle not yet signalled fails the measurement
-        # and is recorded so that no later exit can make the pair look
-        # ordered. It is not proof that guardian code still ran: Windows may
-        # release the lock during process rundown before the process object
-        # signals, and this sample cannot tell those apart.
+        # was never sampled. A guardian still active here fails the
+        # measurement and is recorded so that no later exit can make the pair
+        # look ordered.
         if "guardian_exit_observed_ns" not in observation:
             if guardian_active():
                 observation["lease_observed_ns"] = clock_ns()
@@ -787,6 +785,15 @@ def _is_active(handle: Any) -> bool:
     raise RuntimeError(f"WaitForSingleObject returned {result}")
 
 
+def _has_live_thread(handle: Any) -> bool:
+    # Not _is_active: Windows sets the exit code, closes the handles (which
+    # frees a LockFileEx lease), and only then signals the process object.
+    # Measured on windows-latest 180 of 180 times, 2026-11-22.
+    _win32api, win32con, _win32event, _win32job = _windows_modules()
+    win32process = importlib.import_module("win32process")
+    return win32process.GetExitCodeProcess(handle) == win32con.STILL_ACTIVE
+
+
 def _launch_owner(
     scenario: str,
     root: Path,
@@ -870,9 +877,14 @@ def _run_probe(scenario: str, root: Path) -> dict[str, Any]:
             guardian_armed = win32event.CreateEvent(
                 None, True, False, guardian_armed_name
             )
+            guardian_python, guardian_env = probe_python_invocation(
+                sys.executable,
+                getattr(sys, "_base_executable", sys.executable),
+                os.environ,
+            )
             guardian = subprocess.Popen(
                 [
-                    sys.executable,
+                    guardian_python,
                     str(Path(__file__).resolve()),
                     "guardian",
                     str(root / "auth"),
@@ -888,9 +900,13 @@ def _run_probe(scenario: str, root: Path) -> dict[str, Any]:
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
+                env=guardian_env,
             )
             guardian_handle = _process_handle(
-                guardian.pid, win32con.PROCESS_TERMINATE | win32con.SYNCHRONIZE
+                guardian.pid,
+                win32con.PROCESS_TERMINATE
+                | win32con.SYNCHRONIZE
+                | win32con.PROCESS_QUERY_LIMITED_INFORMATION,
             )
             _wait(
                 guardian_ready,
@@ -1076,7 +1092,7 @@ def _run_probe(scenario: str, root: Path) -> dict[str, Any]:
                     guardian_loss_observation,
                     termination_requested_ns=guardian_termination_requested_ns,
                     lease_acquired_ns=observed_lease_acquired_ns,
-                    guardian_active=lambda: _is_active(guardian_handle),
+                    guardian_active=lambda: _has_live_thread(guardian_handle),
                     lease_signaled=lambda: not _is_active(lease_acquired_event),
                     owner_active=lambda: _is_active(owner_handle),
                     active_descendants=lambda: sum(
