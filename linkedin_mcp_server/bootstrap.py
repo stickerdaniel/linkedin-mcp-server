@@ -196,7 +196,7 @@ _CREDENTIALS_IN_URL = re.compile(r"[/\\]{2}[^/\\\s]*@")
 #: SECRET`` therefore printed everything from the quote onwards. What the closing
 #: marker actually needs is held back in ``_held_back_closer`` instead, which is
 #: two characters rather than the whole tail.
-_URL_IN_TEXT = re.compile(r"(?i)\b(https?):[/\\]{2}(\S*)")
+_URL_IN_TEXT = re.compile(r"(?i)(https?):[/\\]{2}(\S*)")
 #: Where an authority ends. Backslashes are normalised to slashes first, as Node
 #: does before resolving, so they are not in this class.
 _AUTHORITY_ENDS = re.compile(r"[/?#]")
@@ -210,7 +210,7 @@ _AUTHORITY_ENDS = re.compile(r"[/?#]")
 #: text: a URL run ends at whitespace and a userinfo ends at the first slash as
 #: well, so an opener with either of those between itself and the cut can no
 #: longer reach across it, and the cut in front of it is free.
-_SCHEME_OPENS = re.compile(r"(?i)\bhttps?:[/\\]{2}(?=\S*\Z)")
+_SCHEME_OPENS = re.compile(r"(?i)https?:[/\\]{2}(?=\S*\Z)")
 _CREDENTIAL_OPENS = re.compile(r"[/\\]{2}(?=[^/\\\s]*\Z)")
 #: An opener that has not finished arriving, anchored at the cut. A buffer
 #: ending in ``h`` can be the first character of ``https://SECRET``, and a cut
@@ -218,6 +218,7 @@ _CREDENTIAL_OPENS = re.compile(r"[/\\]{2}(?=[^/\\\s]*\Z)")
 #: yet for anything above to find. Every proper prefix of one is here, which
 #: covers a cut inside a whole opener as the same case.
 _OPENER_PENDING = re.compile(r"(?i)(?:\b(?:h|ht|htt|https?:?[/\\]?)|[/\\])\Z")
+_GLUED_OPENER_PENDING = re.compile(r"(?i)(?:h|ht|htt|https?:?[/\\]?)\Z")
 #: Where a run ends. The ``\S`` of ``_URL_IN_TEXT``, so the two agree on what
 #: one run is.
 _WHITESPACE = re.compile(r"\s")
@@ -3494,7 +3495,9 @@ def _forced_fragment(text: str, cut: int) -> tuple[str, str, bool]:
         return _OMITTED_RUN_HEAD, remaining, running
     # Whichever of the two opens first, and never at zero: an opener there that
     # reached this line is the ordinary-output case, which keeps the plain cut.
-    stops = [start for start in (pending, opened) if start]
+    glued = _GLUED_OPENER_PENDING.search(text, 0, cut)
+    held = None if glued is None else glued.start()
+    stops = [start for start in (pending, opened, held) if start]
     stop = min(stops) if stops else cut
     return text[:stop], text[stop:], False
 
@@ -3530,7 +3533,7 @@ class _RedactedTail:
     def finish(self) -> str:
         """The retained text, redacted, with a partial character resolved."""
         self._append(self._decoder.decode(b"", final=True))
-        self._bound()
+        self._bound(final=True)
         return self._text
 
     def _append(self, decoded: str) -> None:
@@ -3541,7 +3544,7 @@ class _RedactedTail:
             decoded, self._dropping = _dropped_run(decoded)
         self._text += decoded
 
-    def _bound(self) -> None:
+    def _bound(self, final: bool = False) -> None:
         """Redact, then trim, and never in the other order.
 
         Deferred until a trim is due or the text is asked for, because text only
@@ -3554,6 +3557,8 @@ class _RedactedTail:
             return
         cut = len(self._text) - self._limit
         opening = _run_opening(self._text, cut)
+        if final and opening is not None and opening.re is _OPENER_PENDING:
+            opening = None
         # A configured mirror value that is still arriving is a secret this trim
         # would behead: the part that names it is in front of the cut and the
         # private path is behind it, and the exact replacement above can never
@@ -3561,7 +3566,8 @@ class _RedactedTail:
         # so it is looked up by name.
         pending = _pending_value_start(self._text, cut)
         if pending is None and (opening is None or not _is_a_url(opening)):
-            self._text = self._text[cut:]
+            glued = None if final else _GLUED_OPENER_PENDING.search(self._text, 0, cut)
+            self._text = self._text[cut if glued is None else glued.start() :]
             return
         # Keeping a tail means dropping heads, and the head of a URL is the part
         # that names it. What a cut here would leave prints as ordinary text, so

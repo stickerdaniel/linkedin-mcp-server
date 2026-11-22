@@ -7917,6 +7917,52 @@ class TestInstallerLinesAgainstARealPipe:
         assert pieces == ["   indented"]
 
 
+class TestInstallerLinesAcrossAStagedRead:
+    """A forced fragment goes out while the rest of its line has not arrived."""
+
+    async def _staged(self, first: bytes, rest: bytes) -> list[str]:
+        from linkedin_mcp_server.bootstrap import _installer_lines
+
+        reader = asyncio.StreamReader(limit=2**22)
+        lines = _installer_lines(reader)
+        reader.feed_data(first)
+        emitted = [await anext(lines)]
+        reader.feed_data(rest)
+        reader.feed_eof()
+        return emitted + [line async for line in lines]
+
+    @pytest.mark.parametrize(
+        "before_the_cut", ["h", "ht", "htt", "http", "https", "https:", "https:/"]
+    )
+    async def test_a_glued_url_arriving_across_a_forced_cut_keeps_its_secret(
+        self, before_the_cut
+    ):
+        from linkedin_mcp_server.bootstrap import _MAX_LINE_CHARS
+
+        url = "https://cdn.example/s3cr3tZQX/x.zip"
+        arrived = len(before_the_cut) + 1
+        padding = "x" * (_MAX_LINE_CHARS - len(before_the_cut))
+
+        emitted = await self._staged(
+            (padding + url[:arrived]).encode(), (url[arrived:] + "\n").encode()
+        )
+
+        assert "s3cr3tZQX" not in "".join(emitted)
+        assert "".join(emitted).startswith(padding)
+
+    async def test_scheme_relative_userinfo_across_a_forced_cut_keeps_its_secret(self):
+        from linkedin_mcp_server.bootstrap import _MAX_LINE_CHARS
+
+        padding = "x" * (_MAX_LINE_CHARS - 1)
+
+        emitted = await self._staged(
+            (padding + "//").encode(), b"user:s3cr3tZQX@host.example/p\n"
+        )
+
+        assert "s3cr3tZQX" not in "".join(emitted)
+        assert "".join(emitted).startswith(padding)
+
+
 class TestInstallCallbackThreading:
     """Only the CLI path prints; the background path stays silent."""
 
