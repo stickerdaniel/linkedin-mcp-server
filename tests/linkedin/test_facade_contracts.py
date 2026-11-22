@@ -347,6 +347,7 @@ async def test_facade_search_jobs_forwards_every_filter_in_order(mock_page):
             True,
             "recent",
             17.5,
+            25,
         )
 
     assert result is expected
@@ -361,6 +362,7 @@ async def test_facade_search_jobs_forwards_every_filter_in_order(mock_page):
         True,
         "recent",
         17.5,
+        25,
     )
 
 
