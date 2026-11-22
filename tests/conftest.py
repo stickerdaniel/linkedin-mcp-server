@@ -1,10 +1,34 @@
 import hashlib
 import os
 import sys
+import tempfile
 import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
+
+from hypothesis import HealthCheck, settings
+from hypothesis.configuration import set_hypothesis_home_dir
+
+set_hypothesis_home_dir(Path(tempfile.gettempdir()) / "linkedin-mcp-server-hypothesis")
+settings.register_profile(
+    "ci",
+    max_examples=100,
+    derandomize=True,
+    deadline=None,
+    database=None,
+    print_blob=True,
+    suppress_health_check=[HealthCheck.too_slow],
+)
+settings.register_profile(
+    "dev", max_examples=100, deadline=None, database=None, print_blob=True
+)
+settings.register_profile(
+    "thorough", parent=settings.get_profile("dev"), max_examples=2000
+)
+settings.load_profile(
+    os.environ.get("HYPOTHESIS_PROFILE") or ("ci" if os.environ.get("CI") else "dev")
+)
 
 # FastMCP 4 bridges camelCase reads on MCP SDK models (`result.isError`) with
 # deprecation shims that this switch turns off. The suite runs with them off,
