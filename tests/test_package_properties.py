@@ -15,7 +15,7 @@ import pytest
 from hypothesis import example, given, strategies as st
 from pydantic import ValidationError
 
-from linkedin_mcp_server import login_app, login_relay
+from linkedin_mcp_server import bootstrap, login_app, login_relay
 from linkedin_mcp_server.browser_downgrade import parse_build
 from linkedin_mcp_server.config import loaders
 from linkedin_mcp_server.config.schema import (
@@ -519,3 +519,70 @@ def test_a_descriptor_reads_back_as_it_was_published(
     descriptor: DaemonDescriptor,
 ) -> None:
     assert DaemonDescriptor.from_mapping(json.loads(descriptor.to_json())) == descriptor
+
+
+def _fed_in_pieces(raw: bytes, limit: int, cuts: list[int]) -> str:
+    tail = bootstrap._RedactedTail(limit)
+    for start, end in zip([0, *cuts], [*cuts, len(raw)]):
+        tail.feed(raw[start:end])
+    return tail.finish()
+
+
+prefix = st.text(
+    st.sampled_from("ab0_ ('\"=:\x1b[;m\n"), max_size=12
+) | st.sampled_from(
+    ("\x1b[0m", "\x1b[36;1m", "Downloading from ", "x" * 70 + " \x1b[0m")
+)
+
+
+@given(
+    scheme=st.sampled_from(("http", "https", "HTTPS")),
+    place=st.sampled_from(("path", "query", "user", "password")),
+    before=prefix,
+    after=st.sampled_from(("", " now", "'", "'. URL: x", "\n")),
+    limit=st.integers(8, 80),
+    data=st.data(),
+)
+def test_a_url_secret_never_survives_the_retained_tail(
+    scheme: str, place: str, before: str, after: str, limit: int, data: st.DataObject
+) -> None:
+    userinfo = {"user": f"{CANARY}@", "password": f"user:{CANARY}@"}.get(place, "")
+    path = f"/{CANARY}/x.zip" if place == "path" else "/x.zip"
+    query = f"?token={CANARY}" if place == "query" else ""
+    raw = f"{before}{scheme}://{userinfo}cdn.example{path}{query}{after}".encode()
+
+    cuts = sorted(data.draw(st.lists(st.integers(0, len(raw)), max_size=4)))
+
+    retained = _fed_in_pieces(raw, limit, cuts)
+
+    assert CANARY not in retained
+    assert len(retained) <= limit + len("***")
+
+
+plain = st.lists(
+    st.sampled_from(("a", "z", "0", "_", " ", "\n", ".", ":", "-", "é", "T", "ttps:")),
+    max_size=120,
+).map("".join)
+
+
+words_holding_an_h = st.lists(
+    st.sampled_from(("a", "z", "_", " ", "\n", ":", "ah", "oht", "ahttps:", "0H")),
+    max_size=120,
+).map("".join)
+
+
+@given(text=plain, limit=st.integers(1, 40), data=st.data())
+def test_output_without_an_h_or_a_slash_keeps_its_exact_tail(
+    text: str, limit: int, data: st.DataObject
+) -> None:
+    raw = text.encode()
+    cuts = sorted(data.draw(st.lists(st.integers(0, len(raw)), max_size=6)))
+
+    assert _fed_in_pieces(raw, limit, cuts) == text[-limit:]
+
+
+@given(text=words_holding_an_h, limit=st.integers(1, 40))
+def test_one_read_of_words_that_hold_an_h_keeps_its_exact_tail(
+    text: str, limit: int
+) -> None:
+    assert _fed_in_pieces(text.encode(), limit, []) == text[-limit:]
