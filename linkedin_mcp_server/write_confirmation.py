@@ -164,8 +164,6 @@ class WriteConfirmationMiddleware(Middleware):
                 raise _declined(name)
             return await call_next(context)
 
-        if not ctx.session.can_send_request:
-            return await call_next(context)
         try:
             answer = await ctx.session.elicit_form(
                 prompt, _SCHEMA, related_request_id=ctx.request_id

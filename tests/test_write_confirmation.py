@@ -1,5 +1,6 @@
 from typing import Any
 
+import httpx2
 import mcp.types as mt
 import pytest
 from fastmcp import Client, FastMCP
@@ -247,4 +248,53 @@ async def test_an_answer_counts_only_for_the_call_it_was_asked_for():
             )
 
     assert isinstance(unasked, mt.InputRequiredResult)
+    assert ran == []
+
+
+async def test_a_client_that_cannot_be_asked_back_gets_no_write():
+    ran: list[tuple[str, dict[str, Any]]] = []
+    app = _server(ran).http_app(json_response=True)
+    headers = {
+        "Accept": "application/json, text/event-stream",
+        "MCP-Protocol-Version": "2025-11-25",
+    }
+    initialize = {
+        "protocolVersion": "2025-11-25",
+        "capabilities": {"elicitation": {"form": {}}},
+        "clientInfo": {"name": "test", "version": "1"},
+    }
+    call = {"name": "send_message", "arguments": dict(dict(_WRITES)["send_message"])}
+
+    async with app.router.lifespan_context(app):
+        async with httpx2.AsyncClient(
+            transport=httpx2.ASGITransport(app=app), base_url="http://127.0.0.1"
+        ) as http:
+            opened = await http.post(
+                "/mcp",
+                headers=headers,
+                json={
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "initialize",
+                    "params": initialize,
+                },
+            )
+            headers["Mcp-Session-Id"] = opened.headers["mcp-session-id"]
+            await http.post(
+                "/mcp",
+                headers=headers,
+                json={"jsonrpc": "2.0", "method": "notifications/initialized"},
+            )
+            answered = await http.post(
+                "/mcp",
+                headers=headers,
+                json={
+                    "jsonrpc": "2.0",
+                    "id": 2,
+                    "method": "tools/call",
+                    "params": call,
+                },
+            )
+
+    assert answered.json()["result"]["isError"] is True
     assert ran == []
