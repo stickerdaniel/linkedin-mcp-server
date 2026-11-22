@@ -686,7 +686,7 @@
             },
             "easy_apply": {
               "default": false,
-              "description": "Only show Easy Apply jobs (default false). Classic search only.",
+              "description": "Only show Easy Apply jobs (default false).",
               "type": "boolean"
             },
             "experience_level": {

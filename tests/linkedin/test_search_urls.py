@@ -193,7 +193,7 @@ class TestBuildJobSearchUrl:
             sort_by="date",
         ) == (
             f"{JOBS}keywords=python&location=Berlin&f_TPR=r604800&f_JT=F"
-            "&f_E=2,4&f_WT=2&f_EA=true&sortBy=DD"
+            "&f_E=2,4&f_WT=2&f_AL=true&sortBy=DD"
         )
 
     @pytest.mark.parametrize("keywords,encoded", ENCODED_KEYWORDS)
@@ -321,13 +321,13 @@ class TestBuildJobSearchUrl:
         assert parse_qs(urlparse(url).query)["f_WT"] == ["C++"]
 
     def test_a_facet_token_cannot_inject_an_easy_apply_parameter(self):
-        url = build_job_search_url("python", job_type="x&f_EA=true", easy_apply=True)
+        url = build_job_search_url("python", job_type="x&f_AL=true", easy_apply=True)
 
-        assert url == f"{JOBS}keywords=python&f_JT=x%26f_EA%3Dtrue&f_EA=true"
+        assert url == f"{JOBS}keywords=python&f_JT=x%26f_AL%3Dtrue&f_AL=true"
         assert parse_qs(urlparse(url).query) == {
             "keywords": ["python"],
-            "f_JT": ["x&f_EA=true"],
-            "f_EA": ["true"],
+            "f_JT": ["x&f_AL=true"],
+            "f_AL": ["true"],
         }
 
     def test_mixed_work_types_keep_token_order_and_literal_commas(self):
@@ -378,8 +378,10 @@ class TestBuildJobSearchUrl:
         )
 
     def test_easy_apply_true_adds_the_flag(self):
+        # f_AL, never f_EA: f_EA is LinkedIn's "Under 10 applicants" filter,
+        # and a search sent with it is kept, so nothing downstream would notice.
         assert build_job_search_url("python", easy_apply=True) == (
-            f"{JOBS}keywords=python&f_EA=true"
+            f"{JOBS}keywords=python&f_AL=true"
         )
 
     def test_easy_apply_false_omits_the_flag(self):
