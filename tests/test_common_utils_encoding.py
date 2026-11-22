@@ -7,34 +7,58 @@ whatever a profile path or a cookie value holds. Reading them back as UTF-8 is
 what the rest of the server does, so a write in the locale codec either raises
 inside the caller or leaves bytes no UTF-8 reader can decode.
 
-Both directions are pinned here, because only one of them is loud. A character
-the locale codec cannot encode raises where the caller is already handling a
-failure; a character it can encode succeeds and corrupts the file silently.
+A character the locale codec cannot encode raises where the caller is already
+handling a failure; a character it can encode succeeds and corrupts the file
+silently. Both come from the same missing ``encoding``, so the write test runs
+under an ASCII locale, where it fails on every POSIX host instead of only on
+Windows.
 """
 
+import os
+import subprocess
+import sys
 from pathlib import Path
 
-from linkedin_mcp_server.common_utils import secure_write_text
+import pytest
+
 from linkedin_mcp_server.error_diagnostics import build_issue_diagnostics
 
+# A C locale with UTF-8 mode and locale coercion off makes the locale codec
+# ASCII on macOS and Linux, so a write without an explicit encoding fails here
+# as it does under a Windows ANSI code page.
+_ASCII_LOCALE = {
+    "LC_ALL": "C",
+    "LANG": "C",
+    "PYTHONUTF8": "0",
+    "PYTHONCOERCECLOCALE": "0",
+}
 
-def test_secure_write_text_writes_a_character_the_locale_codec_cannot_encode(tmp_path):
-    """An emoji in an error message is outside every ANSI code page."""
-    content = "- Error: ToolError: profile \U0001f680 unavailable\n"
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX locale variables")
+@pytest.mark.parametrize(
+    "content",
+    [
+        pytest.param("- Error: profile \U0001f680 unavailable\n", id="emoji"),
+        pytest.param("- Error: \u4e2d\u6587 profile name\n", id="cjk"),
+    ],
+)
+def test_secure_write_text_writes_utf8_under_a_non_utf8_locale(tmp_path, content):
+    """The bytes on disk do not depend on the host's locale codec."""
     path = tmp_path / "note.md"
+    write = (
+        "from pathlib import Path\n"
+        "from linkedin_mcp_server.common_utils import secure_write_text\n"
+        f"secure_write_text(Path({str(path)!a}), {content!a})\n"
+    )
 
-    secure_write_text(path, content)
+    run = subprocess.run(
+        [sys.executable, "-c", write],
+        env={**os.environ, **_ASCII_LOCALE},
+        capture_output=True,
+        text=True,
+    )
 
-    assert path.read_text(encoding="utf-8") == content
-
-
-def test_secure_write_text_does_not_leave_the_locale_codec_s_bytes(tmp_path):
-    """A CJK profile name encodes in cp936, so the write succeeds and lies."""
-    content = "- Error: \u4e2d\u6587 profile name\n"
-    path = tmp_path / "note.md"
-
-    secure_write_text(path, content)
-
+    assert run.returncode == 0, run.stderr
     assert path.read_text(encoding="utf-8") == content
 
 
