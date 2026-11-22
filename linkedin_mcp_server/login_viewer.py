@@ -47,8 +47,8 @@ def _decode_mount_field(value: str) -> str:
 def mount_records(mountinfo: str) -> tuple[MountRecord, ...]:
     """Parse Linux mountinfo text into mount points and filesystem types."""
     records: list[MountRecord] = []
-    for line in mountinfo.splitlines():
-        fields = line.split()
+    for line in mountinfo.split("\n"):
+        fields = line.split(" ")
         # Fields 0-5 are fixed, then a variable number of optional tags, then
         # the "-" separator with the filesystem type directly behind it.
         # Searching from index 6 keeps a mount point spelled "-" from being
