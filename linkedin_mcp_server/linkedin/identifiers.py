@@ -401,21 +401,21 @@ def normalize_company_identifier(value: str) -> str:
             "Missing company_name (the /company/ slug of the organization)."
         )
 
-    parsed = _parse_linkedin_url(value, want="/company/ slug", pattern=_COMPANY_SLUG)
-    if parsed is not None:
-        route, reference = parsed
-        if route not in _ORGANIZATION_ROUTES or reference is None:
-            raise InvalidReferenceError(
-                "That is a LinkedIn link but not a company page. Pass the "
-                '/company/ slug, for example "microsoft".'
-            )
+    reference = _identifier(value, _COMPANY_SLUG)
+    if reference is not None:
         return reference
 
-    reference = _identifier(value, _COMPANY_SLUG)
-    if reference is None:
+    parsed = _parse_linkedin_url(value, want="/company/ slug", pattern=_COMPANY_SLUG)
+    if parsed is None:
         raise InvalidReferenceError(
             "That is not a LinkedIn company slug. Pass the part after /company/ "
             'in a company URL, for example "microsoft".'
+        )
+    route, reference = parsed
+    if route not in _ORGANIZATION_ROUTES or reference is None:
+        raise InvalidReferenceError(
+            "That is a LinkedIn link but not a company page. Pass the "
+            '/company/ slug, for example "microsoft".'
         )
     return reference
 

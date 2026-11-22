@@ -44,7 +44,15 @@ NORMALIZERS: dict[str, Normalizer] = {
     "opaque": _opaque,
     "profile_urn": normalize_profile_urn,
 }
-IDEMPOTENT = ("person", "job", "thread", "reply_thread", "opaque", "profile_urn")
+IDEMPOTENT = (
+    "person",
+    "company",
+    "job",
+    "thread",
+    "reply_thread",
+    "opaque",
+    "profile_urn",
+)
 BUILT: dict[str, tuple[Normalizer, Builder, str]] = {
     "person": (normalize_person_identifier, person_profile_url, "/in/"),
     "company": (normalize_company_identifier, company_page_url, "/company/"),
@@ -55,10 +63,21 @@ _SLUG = st.from_regex(r"[a-z0-9][a-z0-9-]{1,29}", fullmatch=True)
 _JOB_ID = st.integers(1, 10**12).map(str)
 _THREAD_ID = st.from_regex(r"2-[A-Za-z0-9_=-]{1,40}", fullmatch=True)
 _URN_ID = st.from_regex(r"ACoA[A-Za-z0-9_-]{1,40}", fullmatch=True)
+_HOST_SHAPED = st.builds(
+    "{}{}".format,
+    st.sampled_from(("", "x.", "de.", "www.", "acme-")),
+    st.sampled_from(
+        ("linkedin.com", "lnkd.in", "LinkedIn.com.", "acme.io", "acme", "linkedin")
+    ),
+)
 _DOT_SEGMENTS = st.sampled_from((".", "..", "%2e", "%2E%2e"))
 WELL_FORMED: dict[str, st.SearchStrategy[str]] = {
     "person": _SLUG,
-    "company": st.one_of(_SLUG, _SLUG.map(lambda slug: f"{slug}.io")),
+    "company": st.one_of(
+        _SLUG,
+        _HOST_SHAPED,
+        st.builds("/company/{}/".format, _HOST_SHAPED),
+    ),
     "job": _JOB_ID,
     "thread": _THREAD_ID,
     "reply_thread": _THREAD_ID,
@@ -151,3 +170,13 @@ def test_a_search_query_selects_a_job_only_through_exactly_one_selection(
     expected = named[0] if len(named) == 1 and named[0] in ("7", "4252026496") else None
 
     assert job_id_from_search_query(query) == expected
+
+
+@given(slug=_HOST_SHAPED, tail=st.sampled_from(("", "/", "/about/")))
+def test_a_company_address_names_its_slug_whatever_the_slug_resembles(
+    slug: str, tail: str
+) -> None:
+    address = f"https://www.linkedin.com/company/{slug}{tail}"
+
+    assert normalize_company_identifier(address) == slug
+    assert normalize_company_identifier(slug) == slug
