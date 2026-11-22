@@ -93,7 +93,7 @@ def require_persistent_profile_mount(
     profile = canonical(profile_dir)
     auth_root = profile.parent
     try:
-        records = mount_records(mountinfo_path.read_text(encoding="utf-8"))
+        records = mount_records(os.fsdecode(mountinfo_path.read_bytes()))
     except OSError as exc:
         raise LoginViewerError(
             f"Cannot verify the Docker profile mount from {mountinfo_path}: {exc}"
