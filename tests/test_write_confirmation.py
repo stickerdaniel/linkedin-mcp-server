@@ -192,7 +192,9 @@ async def test_the_prompt_names_the_recipient_and_the_whole_message(
         user,
     )
 
-    assert user.prompts == [f'Send this LinkedIn message to "someone"?\n\n{message}']
+    assert user.prompts == [
+        f"Send this LinkedIn message to https://www.linkedin.com/in/someone/?\n\n{message}"
+    ]
 
 
 @_BOTH_ERAS
@@ -298,3 +300,38 @@ async def test_a_client_that_cannot_be_asked_back_gets_no_write():
 
     assert answered.json()["result"]["isError"] is True
     assert ran == []
+
+
+@_BOTH_ERAS
+@pytest.mark.parametrize(
+    ("name", "link"),
+    [
+        ("connect_with_person", "https://www.linkedin.com/in/someone/"),
+        ("send_message", "https://www.linkedin.com/in/someone/"),
+        ("reply_to_conversation", "https://www.linkedin.com/messaging/thread/2-abc/"),
+        ("archive_conversation", "https://www.linkedin.com/messaging/thread/2-abc/"),
+        ("dismiss_job", "https://www.linkedin.com/jobs/view/4252026496/"),
+    ],
+)
+async def test_the_prompt_links_what_the_write_acts_on(
+    mode: str, protocol: str, name: str, link: str
+):
+    user = _User({"confirm": True})
+
+    await _call(mode, protocol, name, dict(dict(_WRITES)[name]), user)
+
+    assert link in user.prompts[0]
+
+
+@_BOTH_ERAS
+async def test_a_reference_that_names_no_profile_is_still_asked_about(
+    mode: str, protocol: str
+):
+    user = _User(ElicitResult(action="decline"))
+    arguments = {"linkedin_username": "/feed/", "message": "Hi", "confirm_send": True}
+
+    result, ran = await _call(mode, protocol, "send_message", arguments, user)
+
+    assert user.prompts == ['Send this LinkedIn message to "/feed/"?\n\nHi']
+    assert ran == []
+    assert _code(result) == "user_declined"

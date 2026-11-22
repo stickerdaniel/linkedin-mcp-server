@@ -18,6 +18,7 @@ the caller, so an answer counts only for the call it was asked for.
 import json
 from collections.abc import Callable, Mapping
 from typing import Any
+from urllib.parse import quote
 
 import mcp.types as mt
 from fastmcp.server.context import Context
@@ -27,7 +28,14 @@ from fastmcp.tools.base import InputRequiredToolResult
 from mcp_types.version import MODERN_PROTOCOL_VERSIONS
 from pydantic import TypeAdapter, ValidationError
 
+from linkedin_mcp_server.core.exceptions import InvalidReferenceError
 from linkedin_mcp_server.error_handler import CodedToolError, ErrorCode
+from linkedin_mcp_server.linkedin.identifiers import (
+    normalize_job_id,
+    normalize_person_identifier,
+    normalize_thread_id,
+    reply_thread_id,
+)
 
 _INPUT_KEY = "confirm_write"
 
@@ -45,8 +53,25 @@ _SCHEMA: dict[str, Any] = {
 _BOOL = TypeAdapter(bool)
 
 
-def _quoted(value: Any) -> str:
-    return json.dumps(str(value), ensure_ascii=False)
+_LINKEDIN = "https://www.linkedin.com"
+
+
+def _target(value: Any, normalize: Callable[[str], str], route: str) -> str:
+    try:
+        reference = normalize(value)
+    except (InvalidReferenceError, AttributeError, TypeError):
+        return json.dumps(str(value), ensure_ascii=False)
+    return f"{_LINKEDIN}/{route}/{quote(reference, safe='=')}/"
+
+
+def _person(arguments: Mapping[str, Any]) -> str:
+    return _target(
+        arguments.get("linkedin_username"), normalize_person_identifier, "in"
+    )
+
+
+def _thread(arguments: Mapping[str, Any], normalize: Callable[[str], str]) -> str:
+    return _target(arguments.get("thread_id"), normalize, "messaging/thread")
 
 
 def _is_dry_run(arguments: Mapping[str, Any]) -> bool:
@@ -58,8 +83,8 @@ def _is_dry_run(arguments: Mapping[str, Any]) -> bool:
 
 def _connect(arguments: Mapping[str, Any]) -> str:
     prompt = (
-        f"Send a LinkedIn connection invitation to "
-        f"{_quoted(arguments.get('linkedin_username'))}, or accept theirs?"
+        f"Send a LinkedIn connection invitation to {_person(arguments)}, "
+        "or accept theirs?"
     )
     note = arguments.get("note")
     return prompt if note is None else f"{prompt}\n\nNote:\n{note}"
@@ -69,8 +94,8 @@ def _send(arguments: Mapping[str, Any]) -> str | None:
     if _is_dry_run(arguments):
         return None
     return (
-        f"Send this LinkedIn message to "
-        f"{_quoted(arguments.get('linkedin_username'))}?\n\n{arguments.get('message')}"
+        f"Send this LinkedIn message to {_person(arguments)}?"
+        f"\n\n{arguments.get('message')}"
     )
 
 
@@ -78,20 +103,18 @@ def _reply(arguments: Mapping[str, Any]) -> str | None:
     if _is_dry_run(arguments):
         return None
     return (
-        f"Send this reply in LinkedIn conversation "
-        f"{_quoted(arguments.get('thread_id'))}?\n\n{arguments.get('message')}"
+        f"Send this reply in {_thread(arguments, reply_thread_id)}?"
+        f"\n\n{arguments.get('message')}"
     )
 
 
 def _archive(arguments: Mapping[str, Any]) -> str:
-    return f"Archive LinkedIn conversation {_quoted(arguments.get('thread_id'))}?"
+    return f"Archive {_thread(arguments, normalize_thread_id)}?"
 
 
 def _dismiss(arguments: Mapping[str, Any]) -> str:
-    return (
-        f"Dismiss LinkedIn job {_quoted(arguments.get('job_id'))} from job search? "
-        "LinkedIn offers no undo."
-    )
+    job = _target(arguments.get("job_id"), normalize_job_id, "jobs/view")
+    return f"Dismiss {job} from LinkedIn job search? LinkedIn offers no undo."
 
 
 PROMPTS: dict[str, Callable[[Mapping[str, Any]], str | None]] = {
