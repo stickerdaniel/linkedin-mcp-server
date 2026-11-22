@@ -1122,6 +1122,32 @@ async def _conversation_scenario(method: str) -> dict[str, Any]:
     )
 
 
+async def _unread_conversations_scenario() -> dict[str, Any]:
+    """`get_unread_conversations` whose filtered listing scrolls twice and reads.
+
+    The row click the inbox scenarios script never happens here: the one
+    tool that reports unread state must not disturb it, so no compose
+    navigation and no row selector are scripted either.
+    """
+    name = "get_unread_conversations__baseline"
+    recorder = TraceRecorder(name, _COMMON_ALLOWED)
+    clock = FakeClock(recorder)
+    page = _page(recorder)
+    scrolls = 2  # limit 40 -> max(1, 40 // 20)
+    page.script("evaluate:scroll_main_region", *([True] * scrolls))
+    page.script("evaluate:root_content", _root("Conversation content"))
+    extractor = _extractor(page)
+    async with boundaries(recorder, clock):
+        with recorder.context("get_unread_conversations", "conversation"):
+            arguments = {"limit": 40}
+            result = await extractor.get_unread_conversations(limit=40)
+    page.assert_clean()
+    return recorder.trace(
+        {"method": "get_unread_conversations", "arguments": arguments},
+        _complete_mapping_result(result, section_names=list(result["sections"])),
+    )
+
+
 THREAD_OPTIONS = {
     "triggers": 1,
     "name": "Open the options list in your conversation with Ada Lovelace",
@@ -1268,6 +1294,7 @@ TOOL_FACADE_METHODS = {
     "get_conversation",
     "get_easy_apply_form",
     "get_inbox",
+    "get_unread_conversations",
     "get_job_apply_url",
     "get_my_profile",
     "get_saved_jobs",
@@ -1366,6 +1393,7 @@ async def build_policy_traces() -> dict[str, dict[str, Any]]:
         ),
         "search-posts.json": await _single_capture_facade_scenario("search_posts"),
         "inbox.json": await _conversation_scenario("get_inbox"),
+        "unread-conversations.json": await _unread_conversations_scenario(),
         "conversation.json": await _conversation_scenario("get_conversation"),
         "search-conversations.json": await _conversation_scenario(
             "search_conversations"
