@@ -372,8 +372,11 @@ def employer_apply_url(href: str) -> str | None:
     not the employer's site, so it answers None rather than passing for one.
     An address that never leaves this host is refused the same way.
     """
-    parsed = urlparse(href)
-    host = parsed.hostname
+    try:
+        parsed = urlparse(href)
+        host = parsed.hostname
+    except ValueError:
+        return None
     if parsed.scheme not in ("http", "https") or not host:
         return None
     # Chromium decodes host escapes and treats a backslash as a slash;
