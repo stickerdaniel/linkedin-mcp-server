@@ -18,7 +18,6 @@ the caller, so an answer counts only for the call it was asked for.
 import json
 from collections.abc import Callable, Mapping
 from typing import Any
-from urllib.parse import quote
 
 import mcp.types as mt
 from fastmcp.server.context import Context
@@ -53,25 +52,23 @@ _SCHEMA: dict[str, Any] = {
 _BOOL = TypeAdapter(bool)
 
 
-_LINKEDIN = "https://www.linkedin.com"
-
-
-def _target(value: Any, normalize: Callable[[str], str], route: str) -> str:
+def _named(value: Any, normalize: Callable[[str], str]) -> str:
     try:
-        reference = normalize(value)
+        value = normalize(value)
     except (InvalidReferenceError, AttributeError, TypeError):
-        return json.dumps(str(value), ensure_ascii=False)
-    return f"{_LINKEDIN}/{route}/{quote(reference, safe='=')}/"
+        pass
+    return json.dumps(str(value), ensure_ascii=False)
 
 
 def _person(arguments: Mapping[str, Any]) -> str:
-    return _target(
-        arguments.get("linkedin_username"), normalize_person_identifier, "in"
+    return (
+        f"LinkedIn profile "
+        f"{_named(arguments.get('linkedin_username'), normalize_person_identifier)}"
     )
 
 
 def _thread(arguments: Mapping[str, Any], normalize: Callable[[str], str]) -> str:
-    return _target(arguments.get("thread_id"), normalize, "messaging/thread")
+    return f"LinkedIn conversation {_named(arguments.get('thread_id'), normalize)}"
 
 
 def _is_dry_run(arguments: Mapping[str, Any]) -> bool:
@@ -82,10 +79,7 @@ def _is_dry_run(arguments: Mapping[str, Any]) -> bool:
 
 
 def _connect(arguments: Mapping[str, Any]) -> str:
-    prompt = (
-        f"Send a LinkedIn connection invitation to {_person(arguments)}, "
-        "or accept theirs?"
-    )
+    prompt = f"Send a connection invitation to {_person(arguments)}, or accept theirs?"
     note = arguments.get("note")
     return prompt if note is None else f"{prompt}\n\nNote:\n{note}"
 
@@ -93,10 +87,7 @@ def _connect(arguments: Mapping[str, Any]) -> str:
 def _send(arguments: Mapping[str, Any]) -> str | None:
     if _is_dry_run(arguments):
         return None
-    return (
-        f"Send this LinkedIn message to {_person(arguments)}?"
-        f"\n\n{arguments.get('message')}"
-    )
+    return f"Send this message to {_person(arguments)}?\n\n{arguments.get('message')}"
 
 
 def _reply(arguments: Mapping[str, Any]) -> str | None:
@@ -113,8 +104,8 @@ def _archive(arguments: Mapping[str, Any]) -> str:
 
 
 def _dismiss(arguments: Mapping[str, Any]) -> str:
-    job = _target(arguments.get("job_id"), normalize_job_id, "jobs/view")
-    return f"Dismiss {job} from LinkedIn job search? LinkedIn offers no undo."
+    job = _named(arguments.get("job_id"), normalize_job_id)
+    return f"Dismiss LinkedIn job {job} from job search? LinkedIn offers no undo."
 
 
 PROMPTS: dict[str, Callable[[Mapping[str, Any]], str | None]] = {
