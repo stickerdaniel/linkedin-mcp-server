@@ -221,20 +221,27 @@ plain_text = st.text(st.characters(exclude_characters="*"), max_size=12)
     before=plain_text,
     after=plain_text,
     encoded=st.booleans(),
+    quoted=st.sampled_from(("password", "username")),
 )
 def test_redaction_removes_the_proxy_credentials_plain_and_escaped(
-    password: str, username: str, before: str, after: str, encoded: bool
+    password: str,
+    username: str,
+    before: str,
+    after: str,
+    encoded: bool,
+    quoted: str,
 ) -> None:
     config = BrowserConfig(
         proxy_server="http://proxy.example:8080",
         proxy_username=username,
         proxy_password=password,
     )
-    shown = quote(password, safe="") if encoded else password
+    secret = password if quoted == "password" else username
+    shown = quote(secret, safe="") if encoded else secret
     with patch.object(proxy_errors, "_browser_config", lambda: config):
         redacted = proxy_errors.redact_proxy_credentials(f"{before}{shown}{after}")
 
-    assert password not in redacted and shown not in redacted
+    assert secret not in redacted and shown not in redacted
 
 
 @given(

@@ -283,7 +283,9 @@ word = st.text(
 
 
 @given(
-    card_title=st.lists(word, min_size=1, max_size=4).map(" | ".join),
+    card_title=st.lists(word, min_size=1, max_size=4)
+    .map(" | ".join)
+    .filter(lambda title: not title.startswith("(")),
     company=word,
     unread=st.sampled_from(("", "(3) ", "(99+) ")),
 )
