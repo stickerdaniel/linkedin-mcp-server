@@ -26,7 +26,7 @@ _RELEASE_WORKFLOW = _REPO_ROOT / ".github" / "workflows" / "release.yml"
 _EVIDENCE_WORKFLOW = _REPO_ROOT / ".github" / "workflows" / "differential-evidence.yml"
 _FORWARDER_WORKFLOW = _REPO_ROOT / ".github" / "workflows" / "forwarder-compat.yml"
 _DEPENDENCY_REVIEW = (
-    "actions/dependency-review-action@a1d282b36b6f3519aa1f3fc636f609c47dddb294 # v5.0.0"
+    "actions/dependency-review-action@bbc44d14a204704ccc493733616cd1e93a0321ec # v5.0.1"
 )
 _ACTION_PIN = re.compile(r"uses:\s+[^@\s]+@([0-9a-f]{40})\s+#\s+v\S+")
 
