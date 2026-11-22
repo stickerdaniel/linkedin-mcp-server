@@ -51,6 +51,26 @@ BUILT: dict[str, tuple[Normalizer, Builder, str]] = {
     "job": (normalize_job_id, job_view_url, "/jobs/view/"),
     "thread": (normalize_thread_id, messaging_thread_url, "/messaging/thread/"),
 }
+_SLUG = st.from_regex(r"[a-z0-9][a-z0-9-]{1,29}", fullmatch=True)
+_JOB_ID = st.integers(1, 10**12).map(str)
+_THREAD_ID = st.from_regex(r"2-[A-Za-z0-9_=-]{1,40}", fullmatch=True)
+_URN_ID = st.from_regex(r"ACoA[A-Za-z0-9_-]{1,40}", fullmatch=True)
+_DOT_SEGMENTS = st.sampled_from((".", "..", "%2e", "%2E%2e"))
+WELL_FORMED: dict[str, st.SearchStrategy[str]] = {
+    "person": _SLUG,
+    "company": st.one_of(_SLUG, _SLUG.map(lambda slug: f"{slug}.io")),
+    "job": _JOB_ID,
+    "thread": _THREAD_ID,
+    "reply_thread": _THREAD_ID,
+    "opaque": _JOB_ID,
+    "profile_urn": st.one_of(
+        _URN_ID, _URN_ID.map(lambda urn: f"urn:li:fsd_profile:{urn}")
+    ),
+}
+
+
+def _reference(data: st.DataObject, name: str) -> str:
+    return data.draw(st.one_of(references, WELL_FORMED[name], _DOT_SEGMENTS))
 
 
 def _accepted(normalize: Normalizer, value: str) -> str | None:
@@ -69,9 +89,9 @@ def test_a_reference_is_repaired_or_refused_as_invalid(name: str, value: str) ->
 
 
 @pytest.mark.parametrize("name", IDEMPOTENT)
-@given(value=references)
-def test_a_repaired_reference_repairs_to_itself(name: str, value: str) -> None:
-    once = _accepted(NORMALIZERS[name], value)
+@given(data=st.data())
+def test_a_repaired_reference_repairs_to_itself(name: str, data: st.DataObject) -> None:
+    once = _accepted(NORMALIZERS[name], _reference(data, name))
     if once is None:
         return
 
@@ -79,15 +99,12 @@ def test_a_repaired_reference_repairs_to_itself(name: str, value: str) -> None:
 
 
 @pytest.mark.parametrize("name", BUILT)
-@given(
-    value=references,
-    suffix=st.sampled_from(("", "/", "/details/experience/")),
-)
+@given(data=st.data(), suffix=st.sampled_from(("", "/", "/details/experience/")))
 def test_a_built_url_names_the_reference_it_was_built_from(
-    name: str, value: str, suffix: str
+    name: str, data: st.DataObject, suffix: str
 ) -> None:
     normalize, build, route = BUILT[name]
-    reference = _accepted(normalize, value)
+    reference = _accepted(normalize, _reference(data, name))
     if reference is None:
         return
 
