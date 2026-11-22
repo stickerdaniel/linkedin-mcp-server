@@ -26,9 +26,7 @@ Skipped automatically when chromium is not installed; run locally after
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
 from typing import Any
-from zoneinfo import ZoneInfo
 
 import json
 
@@ -1348,17 +1346,18 @@ class TestPageTimeZone:
     """
 
     @pytest.mark.parametrize(
-        "zone,offset",
+        "zone,names,offset",
         [
-            ("Asia/Kolkata", "+05:30"),
-            ("America/Caracas", "-04:00"),
+            # Chromium names Asia/Kolkata by its older link, Asia/Calcutta.
+            ("Asia/Kolkata", {"Asia/Kolkata", "Asia/Calcutta"}, "+05:30"),
+            ("America/Caracas", {"America/Caracas"}, "-04:00"),
             # A zero offset comes back from the page as -0, a float.
-            ("UTC", "+00:00"),
-            ("Africa/Abidjan", "+00:00"),
+            ("UTC", {"UTC"}, "+00:00"),
+            ("Africa/Abidjan", {"Africa/Abidjan"}, "+00:00"),
         ],
     )
     async def test_the_page_reports_the_zone_it_renders_in(
-        self, dom_page, zone: str, offset: str
+        self, dom_page, zone: str, names: set[str], offset: str
     ):
         browser = dom_page.context.browser
         assert browser is not None
@@ -1375,8 +1374,6 @@ class TestPageTimeZone:
 
         reported = result["time_zone"]
         assert reported["utc_offset"] == offset
-        # Chromium names Asia/Kolkata by its older link, Asia/Calcutta. The
-        # name is what a caller converts with, so it must be the same zone,
-        # not necessarily the same spelling.
-        now = datetime.now(UTC)
-        assert ZoneInfo(reported["id"]).utcoffset(now) == ZoneInfo(zone).utcoffset(now)
+        # The name is what a caller converts with, so it must name this zone.
+        # A zone that only shares today's offset converts older times wrongly.
+        assert reported["id"] in names
