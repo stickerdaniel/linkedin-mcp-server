@@ -1015,11 +1015,14 @@ async def test_export_cookies_preserves_partitioned_cookie_identity(tmp_path):
     partitioned = {
         **_make_cookie("bcookie", "partitioned"),
         "partitionKey": "https://example.com",
+        "_crHasCrossSiteAncestor": True,
     }
+    same_site = {**partitioned, "value": "same-site", "_crHasCrossSiteAncestor": False}
     context.cookies.return_value = [
         _make_cookie("li_at", "session-token"),
         _make_cookie("bcookie", "unpartitioned"),
         partitioned,
+        same_site,
     ]
     cookie_path = tmp_path / "cookies.json"
 
@@ -1030,6 +1033,7 @@ async def test_export_cookies_preserves_partitioned_cookie_identity(tmp_path):
         _make_cookie("li_at", "session-token"),
         _make_cookie("bcookie", "unpartitioned"),
         partitioned,
+        same_site,
     ]
 
 

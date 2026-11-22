@@ -880,7 +880,7 @@ class BrowserManager:
         allowed_names: frozenset[str] | None = None,
     ) -> list[dict[str, Any]]:
         """Normalize and deduplicate cookies safe for portable persistence."""
-        cookies_by_identity: dict[tuple[Any, Any, Any, Any], dict[str, Any]] = {}
+        cookies_by_identity: dict[tuple[Any, ...], dict[str, Any]] = {}
         for raw_cookie in all_cookies:
             if not cls._is_linkedin_cookie(raw_cookie):
                 continue
@@ -896,6 +896,7 @@ class BrowserManager:
                 cookie.get("domain"),
                 cookie.get("path", "/"),
                 cookie.get("partitionKey"),
+                cookie.get("_crHasCrossSiteAncestor"),
             )
             cookies_by_identity[identity] = cookie
         return list(cookies_by_identity.values())
