@@ -10,6 +10,7 @@ from unittest.mock import AsyncMock, MagicMock, call
 import mcp.types as mt
 import pytest
 from fastmcp import Client, FastMCP
+from fastmcp.client.elicitation import ElicitResult
 from fastmcp.server.middleware import MiddlewareContext
 
 import linkedin_mcp_server.server as server_module
@@ -647,6 +648,48 @@ class TestProxyRole:
             served = {tool.name for tool in await client.list_tools()}
 
         assert served == {"get_person_profile", "search_jobs"}
+
+    @_BOTH_ERAS
+    @pytest.mark.parametrize(
+        ("answer", "sent"),
+        [({"confirm": True}, ["Hello"]), (ElicitResult(action="decline"), [])],
+        ids=["accepted", "declined"],
+    )
+    async def test_a_proxy_asks_the_user_before_it_forwards_a_write(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        mode: str,
+        protocol: str,
+        answer: Any,
+        sent: list[str],
+    ):
+        messages: list[str] = []
+        owner = FastMCP("owner")
+
+        @owner.tool
+        async def send_message(
+            linkedin_username: str, message: str, confirm_send: bool
+        ) -> dict[str, bool]:
+            messages.append(message)
+            return {"sent": True}
+
+        async def user(*_: Any) -> Any:
+            return answer
+
+        proxy = _proxy_to(monkeypatch, owner)
+        async with Client(proxy, mode=mode, elicitation_handler=user) as client:
+            assert client.protocol_version == protocol
+            await client.call_tool(
+                "send_message",
+                {
+                    "linkedin_username": "someone",
+                    "message": "Hello",
+                    "confirm_send": True,
+                },
+                raise_on_error=False,
+            )
+
+        assert messages == sent
 
     async def test_a_proxy_registers_none_of_its_own_tools(
         self, monkeypatch: pytest.MonkeyPatch

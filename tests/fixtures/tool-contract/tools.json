@@ -72,7 +72,7 @@
       "destructiveHint": true,
       "openWorldHint": true
     },
-    "description": "Send a LinkedIn connection request or accept an incoming one.\n\nThe tool is annotated with destructiveHint so MCP clients will\nprompt for user confirmation before execution.",
+    "description": "Send a LinkedIn connection request or accept an incoming one.\n\nWhere the client supports elicitation, the user confirms the\ninvitation in the client before anything is sent.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {

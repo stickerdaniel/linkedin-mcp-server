@@ -46,6 +46,7 @@ from linkedin_mcp_server.server_role import (
 )
 from linkedin_mcp_server.session_status import session_status
 from linkedin_mcp_server.update_check import UpdateNoticeMiddleware
+from linkedin_mcp_server.write_confirmation import WriteConfirmationMiddleware
 from linkedin_mcp_server.tools.company import register_company_tools
 from linkedin_mcp_server.tools.feed import register_feed_tools
 from linkedin_mcp_server.tools.job import register_job_tools
@@ -285,6 +286,10 @@ def create_mcp_server(
     # First, so it is the outermost layer on every role: everything inside it
     # still sees a failure as the exception it raised.
     mcp.add_middleware(ErrorCodeMiddleware())
+    # Second, so a proxy asks before it forwards and a direct server asks before
+    # it takes the browser lock, and the user's answer counts against no timeout.
+    if role.faces_a_client:
+        mcp.add_middleware(WriteConfirmationMiddleware())
     # Added before the serializing middleware below, which makes it the outer one.
     # An inner position would work: `close_browser` does not consult the in-flight
     # count, so quiescence succeeds from there, and the lease reference the inner

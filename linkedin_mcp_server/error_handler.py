@@ -80,6 +80,7 @@ class ErrorCode(StrEnum):
     BROWSER_BUSY = "browser_busy"
     BROWSER_UNAVAILABLE = "browser_unavailable"
     OUTCOME_UNKNOWN = "outcome_unknown"
+    USER_DECLINED = "user_declined"
     INTERNAL = "internal"
 
 
