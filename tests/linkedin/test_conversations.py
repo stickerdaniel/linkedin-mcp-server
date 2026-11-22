@@ -23,6 +23,7 @@ from linkedin_mcp_server.core.exceptions import (
 )
 from linkedin_mcp_server.linkedin.content import PageContentReader
 from linkedin_mcp_server.linkedin.conversations import (
+    _PAGE_TIME_ZONE_JS,
     ConversationReader,
     _IndexGap,
     _StoppedRow,
@@ -1919,7 +1920,10 @@ class TestSearchConversations:
             result = await reader.search_conversations("nobody")
 
         assert mock_page.wait_for_selector.await_count == 1
-        mock_page.evaluate.assert_not_awaited()
+        assert [
+            _PAGE_TIME_ZONE_JS in call.args[0]
+            for call in mock_page.evaluate.await_args_list
+        ] == [True]
         assert result == {
             "url": mock_page.url,
             "sections": {"search_results": "No messages yet!"},
