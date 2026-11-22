@@ -243,8 +243,8 @@ def register_person_tools(
         """
         Send a LinkedIn connection request or accept an incoming one.
 
-        The tool is annotated with destructiveHint so MCP clients will
-        prompt for user confirmation before execution.
+        Where the client supports elicitation, the user confirms the
+        invitation in the client before anything is sent.
 
         Args:
             linkedin_username: LinkedIn username (e.g., "stickerdaniel", "williamhgates"). A full profile URL is accepted too and is reduced to the username.
