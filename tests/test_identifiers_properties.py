@@ -75,17 +75,17 @@ def _reference(data: st.DataObject, name: str) -> str:
 
 def _accepted(normalize: Normalizer, value: str) -> str | None:
     try:
-        return normalize(value)
+        result = normalize(value)
     except InvalidReferenceError:
         return None
+    assert isinstance(result, str)
+    return result
 
 
 @pytest.mark.parametrize("name", NORMALIZERS)
 @given(value=references)
 def test_a_reference_is_repaired_or_refused_as_invalid(name: str, value: str) -> None:
-    result = _accepted(NORMALIZERS[name], value)
-
-    assert result is None or isinstance(result, str)
+    _accepted(NORMALIZERS[name], value)
 
 
 @pytest.mark.parametrize("name", IDEMPOTENT)
