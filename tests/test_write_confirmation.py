@@ -1,3 +1,4 @@
+import re
 from typing import Any
 
 import httpx2
@@ -193,7 +194,7 @@ async def test_the_prompt_names_the_recipient_and_the_whole_message(
     )
 
     assert user.prompts == [
-        f"Send this LinkedIn message to https://www.linkedin.com/in/someone/?\n\n{message}"
+        f'Send this message to LinkedIn profile "someone"?\n\n{message}'
     ]
 
 
@@ -304,23 +305,31 @@ async def test_a_client_that_cannot_be_asked_back_gets_no_write():
 
 @_BOTH_ERAS
 @pytest.mark.parametrize(
-    ("name", "link"),
+    ("name", "target"),
     [
-        ("connect_with_person", "https://www.linkedin.com/in/someone/"),
-        ("send_message", "https://www.linkedin.com/in/someone/"),
-        ("reply_to_conversation", "https://www.linkedin.com/messaging/thread/2-abc/"),
-        ("archive_conversation", "https://www.linkedin.com/messaging/thread/2-abc/"),
-        ("dismiss_job", "https://www.linkedin.com/jobs/view/4252026496/"),
+        ("connect_with_person", 'LinkedIn profile "someone"'),
+        ("send_message", 'LinkedIn profile "someone"'),
+        ("reply_to_conversation", 'LinkedIn conversation "2-abc"'),
+        ("archive_conversation", 'LinkedIn conversation "2-abc"'),
+        ("dismiss_job", 'LinkedIn job "4252026496"'),
     ],
 )
-async def test_the_prompt_links_what_the_write_acts_on(
-    mode: str, protocol: str, name: str, link: str
+async def test_the_prompt_names_what_the_write_acts_on_without_a_url(
+    mode: str, protocol: str, name: str, target: str
 ):
     user = _User({"confirm": True})
+    arguments = dict(dict(_WRITES)[name])
+    reference = {
+        "linkedin_username": "https://www.linkedin.com/in/someone/",
+        "thread_id": "/messaging/thread/2-abc/",
+        "job_id": "https://www.linkedin.com/jobs/view/4252026496/",
+    }
+    arguments.update({key: reference[key] for key in arguments if key in reference})
 
-    await _call(mode, protocol, name, dict(dict(_WRITES)[name]), user)
+    await _call(mode, protocol, name, arguments, user)
 
-    assert link in user.prompts[0]
+    assert target in user.prompts[0]
+    assert not re.search(r"https?://|www\.|linkedin\.com", user.prompts[0])
 
 
 @_BOTH_ERAS
@@ -332,6 +341,6 @@ async def test_a_reference_that_names_no_profile_is_still_asked_about(
 
     result, ran = await _call(mode, protocol, "send_message", arguments, user)
 
-    assert user.prompts == ['Send this LinkedIn message to "/feed/"?\n\nHi']
+    assert user.prompts == ['Send this message to LinkedIn profile "/feed/"?\n\nHi']
     assert ran == []
     assert _code(result) == "user_declined"
