@@ -44,22 +44,22 @@ _ASCII_LOCALE = {
 )
 def test_secure_write_text_writes_utf8_under_a_non_utf8_locale(tmp_path, content):
     """The bytes on disk do not depend on the host's locale codec."""
-    path = tmp_path / "note.md"
     write = (
         "from pathlib import Path\n"
         "from linkedin_mcp_server.common_utils import secure_write_text\n"
-        f"secure_write_text(Path({str(path)!a}), {content!a})\n"
+        f"secure_write_text(Path('note.md'), {content!a})\n"
     )
 
     run = subprocess.run(
         [sys.executable, "-c", write],
         env={**os.environ, **_ASCII_LOCALE},
+        cwd=tmp_path,
         capture_output=True,
         text=True,
     )
 
     assert run.returncode == 0, run.stderr
-    assert path.read_text(encoding="utf-8") == content
+    assert (tmp_path / "note.md").read_text(encoding="utf-8") == content
 
 
 def test_diagnostic_note_survives_a_non_ascii_error_message(monkeypatch, tmp_path):
