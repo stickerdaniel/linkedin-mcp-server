@@ -2904,6 +2904,57 @@ class TestFeedTools:
         with pytest.raises(ValidationError, match="num_posts"):
             await mcp.call_tool("get_feed", {"num_posts": 51})
 
+    async def test_get_feed_passes_max_scrolls(self, mock_context, serve_extractor):
+        mock_extractor = MagicMock()
+        mock_extractor.extract_feed = AsyncMock(
+            return_value=ExtractedSection(text="Post 1", references=[])
+        )
+
+        from linkedin_mcp_server.tools.feed import register_feed_tools
+
+        mcp = FastMCP("test")
+        register_feed_tools(mcp)
+
+        serve_extractor(mock_extractor)
+        tool_fn = await get_tool_fn(mcp, "get_feed")
+        await tool_fn(mock_context, num_posts=5, max_scrolls=3)
+        mock_extractor.extract_feed.assert_awaited_once_with(num_posts=5, max_scrolls=3)
+
+    async def test_get_feed_max_scrolls_defaults_to_none(
+        self, mock_context, serve_extractor
+    ):
+        mock_extractor = MagicMock()
+        mock_extractor.extract_feed = AsyncMock(
+            return_value=ExtractedSection(text="Post 1", references=[])
+        )
+
+        from linkedin_mcp_server.tools.feed import register_feed_tools
+
+        mcp = FastMCP("test")
+        register_feed_tools(mcp)
+
+        serve_extractor(mock_extractor)
+        tool_fn = await get_tool_fn(mcp, "get_feed")
+        await tool_fn(mock_context)
+        mock_extractor.extract_feed.assert_awaited_once_with(
+            num_posts=10, max_scrolls=None
+        )
+
+    @pytest.mark.parametrize("max_scrolls", [0, 13])
+    async def test_get_feed_rejects_out_of_range_max_scrolls(
+        self, mock_context, max_scrolls
+    ):
+        """max_scrolls stays within 1-12: it can only shorten the default read."""
+        from fastmcp.exceptions import ValidationError
+
+        from linkedin_mcp_server.tools.feed import register_feed_tools
+
+        mcp = FastMCP("test")
+        register_feed_tools(mcp)
+
+        with pytest.raises(ValidationError, match="max_scrolls"):
+            await mcp.call_tool("get_feed", {"max_scrolls": max_scrolls})
+
 
 class TestPostTools:
     async def test_search_posts_success(self, mock_context, serve_extractor):
