@@ -3281,12 +3281,16 @@ _facet_lists = st.lists(
 def test_a_list_argument_reads_the_same_as_its_json_string(
     tool_boundary: _ToolBoundary, values: list[str]
 ):
+    async def reach(tool_name: str, arguments: dict[str, object]) -> tuple[object, ...]:
+        search = AsyncMock(side_effect=_PageTouched(tool_name))
+        with patch.object(tool_boundary.extractor, tool_name, search):
+            outcome = await tool_boundary.call(tool_name, arguments)
+        return outcome, search.await_args
+
     async def check() -> None:
         for tool_name, valid, field in tool_boundary.cells("array"):
-            native = await tool_boundary.call(tool_name, {**valid, field: values})
-            encoded = await tool_boundary.call(
-                tool_name, {**valid, field: json.dumps(values)}
-            )
+            native = await reach(tool_name, {**valid, field: values})
+            encoded = await reach(tool_name, {**valid, field: json.dumps(values)})
             assert native == encoded, (tool_name, field, values)
 
     asyncio.run(check())
