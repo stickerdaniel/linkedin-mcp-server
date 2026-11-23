@@ -567,8 +567,13 @@ def normalize_job_id(value: str) -> str:
 
 
 def normalize_thread_id(value: str) -> str:
-    """The id for a conversation, from the id or from a reference to it."""
-    thread_id = normalize_opaque_id(value, field="thread_id", route=_THREAD_ROUTE)
+    """The id for a conversation, from the id or from a reference to it.
+
+    The decoded id is judged once more, so ``lnkd%2ein`` is refused as the short
+    link it decodes to here, before a browser starts, and not on a later call.
+    """
+    decoded = normalize_opaque_id(value, field="thread_id", route=_THREAD_ROUTE)
+    thread_id = normalize_opaque_id(decoded, field="thread_id", route=_THREAD_ROUTE)
     if thread_id == "new":
         raise InvalidReferenceError(
             "thread_id refers to the new-message composer, not a conversation. "

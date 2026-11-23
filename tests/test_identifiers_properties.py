@@ -117,6 +117,31 @@ def test_a_repaired_reference_repairs_to_itself(name: str, data: st.DataObject) 
     assert _accepted(NORMALIZERS[name], once) == once
 
 
+ENCODED_SHORT_LINKS = (
+    "lnkd%2ein",
+    "lnkd%2Ein",
+    "lnkd.in%2e",
+    "%6cnkd.in",
+    "lnkd.in%2elnkd.in",
+)
+
+
+@pytest.mark.parametrize("name", IDEMPOTENT)
+@pytest.mark.parametrize("value", ENCODED_SHORT_LINKS)
+def test_an_encoded_host_repairs_to_itself(name: str, value: str) -> None:
+    once = _accepted(NORMALIZERS[name], value)
+    if once is None:
+        return
+
+    assert _accepted(NORMALIZERS[name], once) == once
+
+
+@pytest.mark.parametrize("value", ENCODED_SHORT_LINKS)
+def test_an_encoded_short_link_is_refused_as_a_thread_id(value: str) -> None:
+    with pytest.raises(InvalidReferenceError, match="shortened LinkedIn link"):
+        normalize_thread_id(value)
+
+
 @pytest.mark.parametrize("name", BUILT)
 @given(data=st.data(), suffix=st.sampled_from(("", "/", "/details/experience/")))
 def test_a_built_url_names_the_reference_it_was_built_from(
