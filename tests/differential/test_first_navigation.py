@@ -695,7 +695,11 @@ class _ForkHolder:
     def _hold(self) -> None:
         document = self._sampler.document
         enough = document["samples"] + 1 + SAMPLER_READS
-        while document["samples"] < enough and document["sampler"] == "running":
+        while (
+            document["samples"] < enough
+            and document["sampler"] == "running"
+            and not self._done.is_set()
+        ):
             time.sleep(0.01)
 
 
