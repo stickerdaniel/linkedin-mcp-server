@@ -126,6 +126,20 @@ def test_mount_preflight_uses_the_most_specific_covering_mount(tmp_path: Path) -
     require_persistent_profile_mount(profile, mountinfo_path=mountinfo)
 
 
+def test_mount_preflight_reads_a_carriage_return_inside_a_mount_point(
+    tmp_path: Path,
+) -> None:
+    profile = tmp_path / "persistent" / "auth\rroot" / "profile"
+    mountinfo = tmp_path / "mountinfo"
+    mountinfo.write_bytes(
+        f"36 25 0:31 / / rw - overlay overlay rw\n"
+        f"50 36 0:51 / {profile.parents[1]} rw - tmpfs tmpfs rw\n"
+        f"51 50 8:1 / {profile.parent} rw - ext4 /dev/sda rw\n".encode()
+    )
+
+    require_persistent_profile_mount(profile, mountinfo_path=mountinfo)
+
+
 def test_mount_preflight_rejects_an_unwritable_authentication_root(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -422,7 +422,7 @@ def parse_mountinfo(text: str) -> list[Mount]:
     parent's filesystem.
     """
     mounts: list[Mount] = []
-    for line in text.splitlines():
+    for line in text.split("\n"):
         if not line.strip():
             continue
         fields = line.split(" ")

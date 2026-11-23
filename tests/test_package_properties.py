@@ -6,6 +6,7 @@ import json
 import os
 from collections.abc import Callable
 from dataclasses import fields
+from pathlib import PurePosixPath
 from typing import Literal
 from types import ModuleType
 from unittest.mock import patch
@@ -29,6 +30,8 @@ from linkedin_mcp_server.daemon import config as daemon_config
 from linkedin_mcp_server.daemon import startup
 from linkedin_mcp_server.daemon.descriptor import DaemonDescriptor
 from linkedin_mcp_server.error_handler import value_free_summary
+from linkedin_mcp_server.login_viewer import mount_records
+from linkedin_mcp_server.storage_class import parse_mountinfo
 
 CANARY = "s3cr3tZQX"
 secrets = st.text(
@@ -586,3 +589,74 @@ def test_one_read_of_words_that_hold_an_h_keeps_its_exact_tail(
     text: str, limit: int
 ) -> None:
     assert _fed_in_pieces(text.encode(), limit, []) == text[-limit:]
+
+
+def _as_the_kernel_writes(mount_point: bytes) -> str:
+    escaped = b"".join(
+        b"\\%03o" % byte if byte in b" \t\n\\" else bytes([byte])
+        for byte in mount_point
+    )
+    return os.fsdecode(escaped)
+
+
+names = (
+    st.text(
+        st.sampled_from("ab-é \t\n\\\r\x0b\x0c\x1c\x1d\x1e\x85\u2028\u2029"),
+        min_size=1,
+        max_size=6,
+    ).map(str.encode)
+    | st.binary(min_size=1, max_size=6)
+).filter(
+    lambda name: b"/" not in name and b"\0" not in name and name not in (b".", b"..")
+)
+
+
+mounts = st.tuples(
+    st.lists(names, max_size=3).map(lambda parts: b"/" + b"/".join(parts)),
+    st.sampled_from(("ext4", "nfs4", "tmpfs", "fuse.sshfs", "overlay")),
+    st.lists(st.sampled_from(("shared:1", "master:2")), max_size=2),
+)
+
+
+Table = list[tuple[bytes, str, list[str]]]
+
+
+def _mountinfo(table: Table) -> list[str]:
+    return [
+        f"36 35 98:0 / {_as_the_kernel_writes(point)} rw {' '.join([*tags, '-'])} "
+        f"{fstype} /dev/sda1 rw\n"
+        for point, fstype, tags in table
+    ]
+
+
+@given(table=st.lists(mounts, max_size=4))
+def test_both_mountinfo_readers_return_every_mount_point_the_kernel_wrote(
+    table: Table,
+) -> None:
+    text = "".join(_mountinfo(table))
+    written = [
+        (PurePosixPath(os.fsdecode(point)), fstype) for point, fstype, _ in table
+    ]
+
+    assert [(mount.mount_point, mount.fstype) for mount in parse_mountinfo(text)] == (
+        written
+    )
+    assert [
+        (PurePosixPath(record.point), record.filesystem)
+        for record in mount_records(text)
+    ] == written
+
+
+@given(table=st.lists(mounts, max_size=4), data=st.data())
+def test_a_record_without_a_separator_is_refused_by_one_reader_and_skipped_by_the_other(
+    table: Table, data: st.DataObject
+) -> None:
+    lines = _mountinfo(table)
+    lines.insert(data.draw(st.integers(0, len(lines))), "36 35 98:0 / /mnt/a\rb rw\n")
+    text = "".join(lines)
+
+    with pytest.raises(ValueError, match="does not parse"):
+        parse_mountinfo(text)
+    assert [PurePosixPath(record.point) for record in mount_records(text)] == [
+        PurePosixPath(os.fsdecode(point)) for point, _, _ in table
+    ]
