@@ -325,6 +325,7 @@ from differential.unconfirmed_close import NO_RECOVERY as R7_NO_RECOVERY
 from differential.unconfirmed_close import _ended as _popen_ended
 from differential.unconfirmed_close import POST_SETTLEMENT as R7_POST_SETTLEMENT
 from differential.watcher import (
+    DEADLINE_SECONDS as WATCHER_DEADLINE_SECONDS,
     LAUNCHER_ENV,
     OWNER_MODULES,
     SERVER_MODULE,
@@ -851,7 +852,13 @@ class Watcher:
         self._row = row
         self._process: subprocess.Popen[Any] | None = None
 
-    def start(self, *, ready_seconds: float = 15.0) -> None:
+    def start(self, *, deadline: float = WATCHER_DEADLINE_SECONDS) -> None:
+        """Start the watcher and return once it has taken its baseline.
+
+        Every wait on it is bounded by its own *deadline*, never by a shorter
+        clock: one sample reads the whole process table, which has taken 11s
+        on a loaded Mac under ``-n 4``.
+        """
         command = [
             sys.executable,
             str(WATCHER_SCRIPT),
@@ -869,6 +876,8 @@ class Watcher:
             self._log.platform,
             "--root-pid",
             str(os.getpid()),
+            "--deadline",
+            str(deadline),
         ]
         if self.browser_exe:
             command += ["--browser-exe", self.browser_exe]
@@ -883,15 +892,18 @@ class Watcher:
             process: subprocess.Popen[Any] = subprocess.Popen(
                 command, stdin=subprocess.DEVNULL, stdout=err, stderr=err, **detach
             )
-        self._process = process
+        self._process, self._deadline = process, deadline
         # The first sample is the baseline: a process already running then is
         # never reported as started. Waiting for it means every actor the row
         # starts afterwards is reported as one.
-        deadline = time.monotonic() + ready_seconds
-        while time.monotonic() < deadline:
+        limit = time.monotonic() + deadline
+        while True:
+            # Read after the exit check, so a ready line written just before
+            # the exit is still found.
+            ended = process.poll() is not None
             if any(r.get("kind") == "watcher.ready" for r in read_jsonl(self.out)):
                 return
-            if process.poll() is not None:
+            if ended or time.monotonic() >= limit:
                 break
             time.sleep(0.05)
         # Detached from the row, so nothing else would end it before its own
@@ -914,8 +926,10 @@ class Watcher:
         if self._process is None:
             return None
         self.stop_file.touch()
+        # It ends after the sample under way and one more, which can take as
+        # long as the baseline did.
         try:
-            self._process.wait(timeout=15)
+            self._process.wait(timeout=self._deadline)
         except subprocess.TimeoutExpired:
             self._process.kill()
             self._process.wait(timeout=15)
@@ -4450,6 +4464,8 @@ def family_problems(
     observed: Iterable[Mapping[str, Any]],
     fates: Fates,
     records: Iterable[Mapping[str, Any]],
+    *,
+    outside: Iterable[int] = (),
 ) -> list[str]:
     """Why the installer family is not shown ended, from everything known now.
 
@@ -4462,8 +4478,8 @@ def family_problems(
     """
     observed = list(observed)
     return [
-        *installer_inventory(observed, fates),
-        *unaccounted_members(records, observed, fates),
+        *installer_inventory(observed, fates, outside=outside),
+        *unaccounted_members(records, observed, fates, outside=outside),
     ]
 
 
@@ -6657,6 +6673,13 @@ class CommandSeams:
     scratch: Path
 
 
+class Release(Protocol):
+    """``AuthSeams.release``: issue from now on, to *browser* alone when it
+    is given (``SyntheticOrigin.release_login``)."""
+
+    def __call__(self, *, browser: int | None = None) -> dict[str, Any]: ...
+
+
 @dataclass(frozen=True)
 class AuthSeams:
     """What a row that stages a sign-in may do (``RowContext.auth``).
@@ -6666,11 +6689,12 @@ class AuthSeams:
     the staged session, which is the row's authorization
     (``ORIGIN_REJECTED``); ``authorize``, a user action the row confirms
     (``LOGIN``, ``IMPORT``) recorded before the command it starts; and
-    ``release``, which lets the login's next ask issue a fresh session. Each
-    authorization is read back with the session right after it, which is
-    what shows it came before anything invalidated the original. The
-    teardown closes the sign-in, so nothing still asking after the row can
-    complete. Every reading waits and sends nothing, and none raises.
+    ``release``, which lets the login's next ask issue a fresh session, or
+    only the asks of the one browser it names. Each authorization is read
+    back with the session right after it, which is what shows it came before
+    anything invalidated the original. The teardown closes the sign-in, so
+    nothing still asking after the row can complete. Every reading waits and
+    sends nothing, and none raises.
     """
 
     #: Reject every session the origin accepted; the record, with the
@@ -6680,7 +6704,7 @@ class AuthSeams:
     #: session read right after.
     authorize: Callable[[str], dict[str, Any]]
     #: Let the next completion asks issue fresh sessions.
-    release: Callable[[], dict[str, Any]]
+    release: Release
     #: The sign-in's record so far (``SyntheticOrigin.login_record``).
     login: Callable[[], dict[str, Any]]
     #: The session's artefacts now, read from disk alone, labelled.
@@ -6690,9 +6714,6 @@ class AuthSeams:
     #: A second host with the row's own command and environment, one read of
     #: the feed and a normal quit, its lines its own (``LossSeams.fresh_read``).
     second_host: Callable[[], Awaitable[dict[str, Any]]]
-    #: The progress the latest second host's client heard for its read so
-    #: far, while it runs (``progress_recorder``).
-    second_progress: Callable[[], list[dict[str, Any]]]
     #: Which owner the descriptor names now (``LossSeams.owner_reading``).
     owner_reading: Callable[[str], Awaitable[dict[str, Any]]]
     #: The row's own daemon log, as written so far; every owner's.
@@ -9367,8 +9388,6 @@ async def measure_host_quit_row(
     authorizations: list[Authorization] = []
     #: The second hosts the row ran; each server held until it is gone.
     second_hosts: list[HostSession] = []
-    #: Each second host's progress as its client hears it, the latest last.
-    second_progress: list[list[dict[str, Any]]] = []
 
     def auth_snapshot(label: str) -> dict[str, Any]:
         """``AuthSeams.snapshot``: the artefacts alone, stamped when read."""
@@ -9418,9 +9437,9 @@ async def measure_host_quit_row(
             return {"kind": kind, "recorded": False}
         return authorize_now(kind, time.monotonic_ns())
 
-    def auth_release() -> dict[str, Any]:
+    def auth_release(*, browser: int | None = None) -> dict[str, Any]:
         """``AuthSeams.release``: the row's, in the row's phase."""
-        found = origin.release_login()
+        found = origin.release_login(browser=browser)
         emit("origin", "login.released", **found)
         return found
 
@@ -9479,7 +9498,6 @@ async def measure_host_quit_row(
         directory.mkdir(exist_ok=True)
         held: list[Retained] = []
         progress: list[dict[str, Any]] = []
-        second_progress.append(progress)
 
         def hold(process: Any) -> None:
             held.append(
@@ -9569,9 +9587,6 @@ async def measure_host_quit_row(
             snapshot=auth_snapshot,
             browser_gone=race_browser_gone,
             second_host=auth_second_host,
-            second_progress=lambda: (
-                list(second_progress[-1]) if second_progress else []
-            ),
             owner_reading=loss_owner_reading,
             owner_log=loss_owner_log,
             host_output=lambda: list(host_lines),

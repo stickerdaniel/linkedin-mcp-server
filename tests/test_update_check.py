@@ -104,6 +104,25 @@ class TestPendingUpdateNotice:
 
 
 class TestRefreshLatestVersion:
+    @pytest.mark.parametrize(
+        ("value", "disabled"),
+        [
+            ("0", True),
+            ("false", True),
+            (" No ", True),
+            ("off", True),
+            ("on", False),
+            ("1", False),
+            ("", False),
+        ],
+    )
+    def test_the_setting_turns_the_check_off(self, monkeypatch, value, disabled):
+        monkeypatch.setenv("LINKEDIN_MCP_CHECK_FOR_UPDATES", value)
+        monkeypatch.delenv("CI", raising=False)
+        monkeypatch.setattr(update_check, "__version__", "4.16.1")
+
+        assert _check_disabled() is disabled
+
     async def test_disabled_skips_network(self, monkeypatch):
         monkeypatch.setenv("LINKEDIN_MCP_CHECK_FOR_UPDATES", "off")
         monkeypatch.setattr(update_check, "_latest_known", None)

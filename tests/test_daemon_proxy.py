@@ -1872,7 +1872,8 @@ class TestRecoveringThroughTheWholeProxy:
         """A read or render names nothing that exists, owner or not.
 
         Answered as FastMCP answers any unknown name, never as the departure
-        a tool call would report.
+        a tool call would report. FastMCP 4.2 resolves a Prefab renderer URI
+        from the tool listing, so that read is one more way to reach an owner.
         """
         from mcp import MCPError
 
@@ -1880,8 +1881,9 @@ class TestRecoveringThroughTheWholeProxy:
         _reach_owners_in_process(monkeypatch, lambda _url: None)
 
         async with Client(self._proxy(backend)) as client:
-            with pytest.raises(MCPError, match="Resource not found"):
-                await client.read_resource("linkedin://anything")
+            for uri in ("linkedin://anything", "ui://prefab/renderer/anything"):
+                with pytest.raises(MCPError, match="Resource not found"):
+                    await client.read_resource(uri)
             with pytest.raises(MCPError, match="Unknown prompt"):
                 await client.get_prompt("anything")
 

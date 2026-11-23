@@ -1439,10 +1439,10 @@ def test_a_changed_import_the_close_uses_fails_the_model():
     driver = (_REPO / CLOSE_PATH[1]).read_text(encoding="utf-8")
     moved = _changed(
         driver,
-        ("    release_browser_guardian,\n", ""),
+        ("    BrowserGuardian,\n", ""),
         (
             "from linkedin_mcp_server.profile_lease import",
-            "from linkedin_mcp_server.guardian import release_browser_guardian\n"
+            "from linkedin_mcp_server.guardian import BrowserGuardian\n"
             "from linkedin_mcp_server.profile_lease import",
         ),
     )

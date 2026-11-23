@@ -8,8 +8,8 @@ from typing import Literal
 from urllib.parse import parse_qs, urlparse
 
 
+from linkedin_mcp_server.linkedin.identifiers import job_id_from_path
 from linkedin_mcp_server.linkedin.link_metadata import (
-    JOB_PATH_RE,
     Reference,
     _SEARCH_RESULTS_REFERENCE_CAP,
 )
@@ -34,10 +34,9 @@ def reconcile_search_references(
 
     for ref in references:
         if ref.get("kind") == "job":
-            match = JOB_PATH_RE.match(str(ref.get("url", "")))
-            if match is None:
+            job_id = job_id_from_path(str(ref.get("url", "")))
+            if job_id is None:
                 continue
-            job_id = match.group(1)
             if job_id not in kept_ids or job_id in emitted_ids:
                 continue
             out.append(ref)
@@ -126,9 +125,9 @@ def dropped_offset_section_error(offset: int, landed: str) -> dict[str, str]:
 
 
 # The two filters the redesigned route reads out of the query's words instead
-# of its parameters. Every other filter it drops (`f_JT`, `f_E`, `f_EA`,
-# `sortBy`) has no such second home, so naming the keywords for one of those
-# would offer a repair that does not exist.
+# of its parameters. Every other filter it drops (`f_JT`, `f_E`, `sortBy`) has
+# no such second home, so naming the keywords for one of those would offer a
+# repair that does not exist.
 _KEYWORD_FILTERS = frozenset({"location", "f_WT"})
 
 
@@ -142,13 +141,13 @@ def dropped_filters_section_error(names: list[str], landed: str) -> dict[str, st
     Python in Berlin then returns Python anywhere and reads as though Berlin
     had none.
 
-    The redesigned route keeps only the keywords, `f_TPR` and `start`, and
-    reads a location and a work type from the words of the query instead, so
-    there the message says where they go. Measured: "remote forward deployed
-    engineer in France" returned remote postings in France. Only when one of
-    those two is what was dropped: the route drops the rest as well, and a
-    search that lost its job type is told to rewrite keywords that cannot
-    carry one.
+    Of the parameters this server sends, the redesigned route keeps only the
+    keywords, `f_TPR`, `f_AL` and `start`, and it reads a location and a work
+    type from the words of the query instead, so there the message says where
+    they go. Measured: "remote forward deployed engineer in France" returned
+    remote postings in France. Only when one of those two is what was dropped:
+    the route drops the rest as well, and a search that lost its job type is
+    told to rewrite keywords that cannot carry one.
     """
     message = (
         f"LinkedIn did not keep {', '.join(names)} (landed on {landed}), "
@@ -175,9 +174,11 @@ def missing_description_section_error() -> dict[str, str]:
 
 
 # LinkedIn's offset stride in the search URL. It is NOT how many cards a
-# page renders: a live search served 11 per navigation while advertising 25
-# per page, so paging by this number skipped 13 of every 24 jobs. Only the
-# "are we past the last page" check may use it.
+# page renders: the classic `/jobs/search/` page served 10 or 11 per
+# navigation while advertising 25 per page, so paging by this number skipped
+# over half the jobs. The redesigned `/jobs/search-results/` page renders 25,
+# which matches the stride only by coincidence. Only the "are we past the
+# last page" check may use it.
 RESULTS_PER_LINKEDIN_PAGE = 25
 
 # The routes a job search may legitimately end on. `/jobs/search` is what the
@@ -371,8 +372,11 @@ def employer_apply_url(href: str) -> str | None:
     not the employer's site, so it answers None rather than passing for one.
     An address that never leaves this host is refused the same way.
     """
-    parsed = urlparse(href)
-    host = parsed.hostname
+    try:
+        parsed = urlparse(href)
+        host = parsed.hostname
+    except ValueError:
+        return None
     if parsed.scheme not in ("http", "https") or not host:
         return None
     # Chromium decodes host escapes and treats a backslash as a slash;

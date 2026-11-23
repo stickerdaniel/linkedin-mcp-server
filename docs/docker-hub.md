@@ -19,7 +19,7 @@ A Model Context Protocol (MCP) server that connects AI assistants to LinkedIn. A
 - **Job Search**: Search for jobs with keywords and location filters
 - **Saved Jobs**: List job postings saved by the authenticated user
 - **Dismiss Jobs**: Dismiss a job from job search so later searches no longer show it
-- **People Search**: Search for people by keywords and location
+- **People Search**: Search for people by keywords, location, connection degree, current company, and mutual connections
 - **Person Posts**: Get recent activity/posts from a person's profile
 - **Company Posts**: Get recent posts from a company's LinkedIn feed
 - **Home Feed**: Get recent posts from the authenticated user's LinkedIn home feed
@@ -32,13 +32,15 @@ A Model Context Protocol (MCP) server that connects AI assistants to LinkedIn. A
 
 ## Quick Start
 
-The image ships full Chromium. Log in once through a browser the container shows you in your own browser tab.
+The image ships full Chromium. Create the session directory first: `mkdir -p ~/.linkedin-mcp` (on Windows, `%USERPROFILE%\.linkedin-mcp`).
+
+**Sign in from the chat.** In Claude Desktop and other clients that show MCP Apps, the LinkedIn sign-in opens inside the chat when a tool needs it. Ctrl+V (Cmd+V on a Mac) pastes.
+
+**Or use the login viewer**, which shows the login browser in your own browser tab.
 
 macOS / Linux:
 
 ```bash
-# Create the directory first so the container can save your session into it
-mkdir -p ~/.linkedin-mcp
 docker run -it --rm \
   -v ~/.linkedin-mcp:/home/pwuser/.linkedin-mcp \
   -p 127.0.0.1:6080:6080 \
@@ -110,13 +112,29 @@ Use `$env:USERPROFILE\.linkedin-mcp` when constructing the host path outside JSO
 >
 > **Note:** `stdio` is the default transport. Add `--transport streamable-http` only when you specifically want HTTP mode.
 >
-> **Note:** In HTTP mode the endpoint has no authentication, so the address it
-> is published on is the only thing limiting who can use your LinkedIn session.
-> Publish to loopback: `-p 127.0.0.1:8080:8080` together with
-> `--host 0.0.0.0`. The wildcard host is required for the server to be reachable
-> inside the container at all; the `127.0.0.1:` prefix on `-p` is what keeps it
-> off your network. Without that prefix Docker publishes on every interface.
-> Only expose it more widely behind something that authenticates.
+> **Note:** HTTP mode in Docker requires a bearer token, because
+> `--host 0.0.0.0` is beyond loopback inside the container. Generate one, pass
+> it through, and publish to loopback:
+>
+> ```bash
+> export LINKEDIN_MCP_HTTP_TOKEN="$(openssl rand -hex 32)"
+> docker run -it --rm \
+>   -v ~/.linkedin-mcp:/home/pwuser/.linkedin-mcp \
+>   -e LINKEDIN_MCP_HTTP_TOKEN \
+>   -p 127.0.0.1:8080:8080 \
+>   stickerdaniel/linkedin-mcp-server:latest \
+>   --transport streamable-http --host 0.0.0.0 --port 8080 --path /mcp
+> ```
+>
+> The client sends `Authorization: Bearer <token>` on every request, for
+> example `"headers": { "Authorization": "Bearer <token>" }` next to
+> `"url": "http://127.0.0.1:8080/mcp"`; a request without it gets `401`. The
+> wildcard host is required for the server to be reachable inside the
+> container at all; the `127.0.0.1:` prefix on `-p` keeps it off your network.
+> Plain HTTP sends the token unencrypted, so reach it from another machine
+> through an SSH tunnel or an HTTPS reverse proxy.
+> `LINKEDIN_MCP_ALLOW_UNAUTHENTICATED_HTTP=true` starts without a token, which
+> is unsafe: anyone who can reach the port can use your LinkedIn session.
 >
 > **Note:** Only one process uses the browser at a time; others wait briefly
 > and take over when it finishes a call. That coordination does not reach
@@ -133,7 +151,7 @@ Use `$env:USERPROFILE\.linkedin-mcp` when constructing the host path outside JSO
 | `TIMEOUT` | `5000` | Browser timeout in milliseconds |
 | `TOOL_TIMEOUT` | `180` | Timeout for a whole tool call, in seconds. Raise it for calls that read many pages, slow networks, or a cold-start browser. |
 | `LOGIN_TIMEOUT` | `1800` | How long the login browser waits for you to finish signing in, in seconds (`0` = no limit). The Docker viewer ends the login after 30 minutes either way. |
-| `LOGIN_INLINE_WAIT` | `25` | How long a tool call waits for a login to finish, in seconds (max 45). Not used in Docker, where `--login --login-viewer` is the login path. |
+| `LOGIN_INLINE_WAIT` | `25` | How long a tool call waits for a login to finish, in seconds (max 45). Not used in Docker, where `open_login` or `--login --login-viewer` signs in. |
 | `BROWSER_WAIT` | `25` | How long to wait for another server process to hand over the shared browser, in seconds (max 45; `0` = report busy at once). |
 | `BROWSER_MIN_HOLD` | `20` | Shortest time a process keeps the shared browser before handing it over, in seconds. Clamped to 3 seconds below `BROWSER_WAIT`, so raise that one along with it. Higher means fewer browser restarts but longer waits for other clients. |
 | `BROWSER_IDLE_TIMEOUT` | `600` | Close an idle browser and release the profile after this many seconds without a tool call (`0` = keep it open). |
@@ -142,6 +160,8 @@ Use `$env:USERPROFILE\.linkedin-mcp` when constructing the host path outside JSO
 | `HOST` | `127.0.0.1` | HTTP server host (for streamable-http transport) |
 | `PORT` | `8000` | HTTP server port (for streamable-http transport) |
 | `HTTP_PATH` | `/mcp` | HTTP server path (for streamable-http transport) |
+| `LINKEDIN_MCP_HTTP_TOKEN` | - | Bearer token HTTP clients must send as `Authorization: Bearer <token>`, at least 32 characters. Required for HTTP mode in Docker. Use this variable in Docker rather than `--http-token-file`: a read-only secrets mount often reports mode `0444`, which the file check refuses. |
+| `LINKEDIN_MCP_ALLOW_UNAUTHENTICATED_HTTP` | `false` | Unsafe: serve HTTP beyond loopback without a token. Only for a port that something else restricts. |
 | `SLOW_MO` | `0` | Delay between browser actions in ms (debugging) |
 | `HEADLESS` | `false` | Docker runs full headed Chromium on a virtual display. Set `true` only for Chromium's real headless mode, which identifies itself as `HeadlessChrome`. |
 | `DAEMON_ENABLED` | `false` | The experimental shared-browser daemon is ignored in Docker. |

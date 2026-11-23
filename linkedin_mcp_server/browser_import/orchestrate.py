@@ -46,7 +46,6 @@ from linkedin_mcp_server.exceptions import (
     NoLinkedInSessionFoundError,
 )
 from linkedin_mcp_server.process_tree import (
-    release_browser_guardian,
     start_browser_guardian,
 )
 from linkedin_mcp_server.profile_lease import ProfileLease, get_profile_lease
@@ -302,7 +301,7 @@ async def _import_holding_the_profile(
     # For the reason the login path starts one: validation launches Chromium
     # through its own manager, so without a guardian a crash here would free the
     # profile with that browser still running on it.
-    start_browser_guardian(lease.guardian_fd())
+    guardian = start_browser_guardian(lease.guardian_fd())
 
     imported = False
     shutdown_confirmed = True
@@ -318,11 +317,7 @@ async def _import_holding_the_profile(
         raise
     finally:
         if shutdown_confirmed:
-            # For the reason the login releases here: one guardian exists per
-            # process, so keeping this one past a proved teardown would leave
-            # every later launch reusing a guardian whose descriptor no longer
-            # locks anything.
-            release_browser_guardian()
+            guardian.release()
             lease.mark_browser_closed()
             # The retirement happens before a replacement exists, so an import
             # where every candidate is rejected — or that raises on

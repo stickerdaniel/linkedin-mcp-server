@@ -15,6 +15,14 @@ uv run pytest --cov
 
 The [README](../README.md#setup-from-source-develop--contribute) covers running the server locally and logging in.
 
+A server you start by hand uses your real profile under `~/.linkedin-mcp`. Without a valid session there, it imports one from a logged-in browser and moves the old state aside. For a run that needs no LinkedIn session, give it a directory of its own:
+
+```bash
+USER_DATA_DIR="$(mktemp -d)/profile" uv run -m linkedin_mcp_server --no-auto-import
+```
+
+That directory gets its own Chromium download, about 380 MB. A tool that reads LinkedIn still opens a login window there.
+
 ## How the server reads LinkedIn
 
 ### Read the rendered page
@@ -65,6 +73,7 @@ Every tool that reads LinkedIn returns `{"url": str, "sections": {name: raw_text
 - `job_ids`: returned by `search_jobs` and `get_saved_jobs`.
 - `total` and `promoted_job_ids`: returned by `search_jobs`. `total` is `{count, exact}`, the result count LinkedIn advertises. `promoted_job_ids` is the promoted subset of `job_ids`.
 - `pagination`: returned by `search_jobs` unless a failure stopped it. `{pages_fetched, next_offset, reason}`, where `reason` is `complete`, `max_pages`, `time_budget` or `no_new_ids`.
+- `time_zone`: returned by `get_inbox`, `get_conversation` and `search_conversations` when they return text. `{id?, utc_offset}`, the zone the page renders message times in.
 - `apply`: returned by `get_job_apply_url` instead of `sections`. `{type, url?}`, where `type` is `easy_apply`, `external`, `applied`, `closed` or `unknown`.
 - `apply` beside `sections`: added by `get_job_details` when the posting shows it was applied to or has closed. `{type}`, where `type` is `applied` or `closed`.
 - `apply` and `form`: returned by `get_easy_apply_form` instead of `sections`. `form` is present for Easy Apply postings only: `{steps: [{heading?, progress?, fields}], complete}`.
@@ -150,7 +159,7 @@ uv run pre-commit run --all-files   # ruff, ty and both generated-file checks
 2. Branch from `main` as `feature/<issue>-<short-description>` or `fix/<issue>-<short-description>`.
 3. Implement the change with tests and docs, following the checklists above.
 4. Open the PR as a draft. Title it as a [conventional commit](https://www.conventionalcommits.org/), `type(scope): Subject`, with a capitalized, imperative subject under 50 characters. PRs are squash-merged, so the title becomes the commit subject on `main` and the commits inside the PR are only for review.
-5. Finish the attribution line at the end of the PR template. CI fails until the last line is `<Job> with <model> (<effort>) in <tool> via <host>.`, for example `Implemented with Claude Opus 5.5 (xhigh) in Claude Code via T3 Code.` The job is what you did with the model, such as Implemented or Reviewed. The effort is the model's reasoning setting, or `effort unknown` when nothing states it. The tool is the coding-agent runtime, such as Claude Code or Codex CLI. The host is the app that ran it, such as T3 Code. Write names as their makers do; an operating system is not a host.
+5. Finish the attribution line at the end of the PR template. CI fails until the last line is `<Job> with <model> (<effort>) in <tool> via <host>.`, for example `Implemented with Claude Opus 5.5 (xhigh) in Claude Code via T3 Code.` The job is what you did with the model, such as Implemented or Reviewed. The effort is the model's reasoning setting, such as `high`. The tool is the coding-agent runtime, such as Claude Code or Codex CLI. The host is the app that ran it, such as T3 Code. Write names as their makers do; an operating system is not a host.
 6. Add a changelog fragment if the PR needs one (see below).
 7. If the PR changes a rendered page, such as a `README.md`, add a before and after screenshot of every changed section itself to the PR description. [`docs/pr-media.md`](../docs/pr-media.md) explains how to capture and upload them.
 8. Mark the PR ready for review. AI agents review it first, then a maintainer.

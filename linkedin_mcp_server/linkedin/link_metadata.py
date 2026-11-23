@@ -6,6 +6,11 @@ import re
 from typing import Literal, NotRequired, Required, TypedDict
 from urllib.parse import parse_qs, unquote, urlparse, urlunparse
 
+from linkedin_mcp_server.linkedin.identifiers import (
+    job_id_from_path,
+    job_id_from_search_query,
+)
+
 ReferenceKind = Literal[
     "person",
     "company",
@@ -142,21 +147,13 @@ _LABEL_CONTENT_RE = re.compile("[^\\W_\u115f\u1160\u3164\uffa0]")
 _URL_LIKE_RE = re.compile(r"^(?:https?://|/)\S+$", re.IGNORECASE)
 _DUPLICATE_HALVES_RE = re.compile(r"^(?P<value>.+?)\s+(?P=value)$")
 _WHITESPACE_RE = re.compile(r"\s+")
+# LinkedIn wraps outbound links in either page; /safety/go is the one an
+# external posting's Apply link uses (see job_policy.SAFETY_REDIRECT_PATH).
+_REDIRECT_PATHS = {"/redir/redirect", "/safety/go"}
 _CONNECTIONS_FOLLOW_RE = re.compile(r"\bconnections follow this page\b", re.IGNORECASE)
 _COMPANY_PATH_RE = re.compile(r"^/company/([^/?#]+)")
 _PERSON_PATH_RE = re.compile(r"^/in/([^/?#]+)")
 _SCHOOL_PATH_RE = re.compile(r"^/school/([^/?#]+)")
-# LinkedIn serves a job under both /jobs/view/<id>/ and
-# /jobs/view/<title>-at-<company>-<id>/, and both 301 to the same page, so the
-# id is the trailing number of the segment rather than its start. Anchoring to
-# the start dropped the slugged form, and matched the wrong number whenever a
-# title opened with one: "2026-software-engineer-at-acme-4252026496" read as
-# job 2026. Same shape as the pattern the job-id extraction uses, with one
-# difference that has to stay: `[0-9]` and not `\d`, because Python's `\d`
-# also matches Arabic-Indic and other Unicode decimal digits while
-# JavaScript's does not, and `normalize_job_id` refuses anything outside
-# `[0-9]`. Matching them here only produces a reference the next call rejects.
-JOB_PATH_RE = re.compile(r"^/jobs/view/(?:[^/?#]*-)?([0-9]+)(?=[/?#]|$)")
 _NEWSLETTER_PATH_RE = re.compile(r"^/newsletters/([^/?#]+)")
 _PULSE_PATH_RE = re.compile(r"^/pulse/([^/?#]+)")
 _FEED_PATH_RE = re.compile(r"^/feed/update/([^/?#]+)")
@@ -273,7 +270,10 @@ def normalize_url(href: str, _depth: int = 0) -> str | None:
     if not href or href.startswith("#"):
         return None
 
-    parsed = urlparse(href)
+    try:
+        parsed = urlparse(href)
+    except ValueError:
+        return None
     scheme = parsed.scheme.lower()
     if scheme in {"blob", "javascript", "mailto", "tel"}:
         return None
@@ -281,8 +281,11 @@ def normalize_url(href: str, _depth: int = 0) -> str | None:
         return None
 
     host = parsed.netloc.lower()
-    if _is_linkedin_host(host) and parsed.path == "/redir/redirect/":
-        target = unquote((parse_qs(parsed.query).get("url") or [""])[0]).strip()
+    if _is_linkedin_host(host) and parsed.path.rstrip("/") in _REDIRECT_PATHS:
+        # parse_qs already decodes the parameter once, which is all the
+        # encoding LinkedIn applies. A second decode would turn an escaped
+        # "?", "#" or "/" in the target into a delimiter.
+        target = (parse_qs(parsed.query).get("url") or [""])[0].strip()
         if not target:
             return None
         return normalize_url(target, _depth + 1)
@@ -338,16 +341,16 @@ def classify_link(href: str) -> tuple[ReferenceKind, str] | None:
     if match := _SCHOOL_PATH_RE.match(path):
         return "school", f"/school/{match.group(1)}/"
 
-    if match := JOB_PATH_RE.match(path):
-        return "job", f"/jobs/view/{match.group(1)}/"
+    # Both job routes are read with the grammar normalize_job_id uses, so every
+    # job reference emitted here is one a job tool accepts.
+    if job_id := job_id_from_path(path):
+        return "job", f"/jobs/view/{job_id}/"
 
     # A job card that opens inside a search links to the search with the job
     # selected rather than to the job, as the "More jobs" cards on a posting
-    # do. Without this every one of them was dropped. ASCII digits for the
-    # same reason as `JOB_PATH_RE`.
+    # do. Without this every one of them was dropped.
     if path.rstrip("/") in {"/jobs/search", "/jobs/search-results"}:
-        job_id = (parse_qs(parsed.query).get("currentJobId") or [""])[0]
-        if re.fullmatch(r"[0-9]+", job_id):
+        if job_id := job_id_from_search_query(parsed.query):
             return "job", f"/jobs/view/{job_id}/"
 
     if match := _NEWSLETTER_PATH_RE.match(path):

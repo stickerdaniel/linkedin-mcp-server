@@ -332,9 +332,8 @@ class TestTheOwnerSideMiddleware:
         assert marker not in _tracked(daemon_liveness.get_liveness())
 
     async def test_an_abandoned_call_is_stopped_and_says_so(self, monkeypatch):
-        from fastmcp.exceptions import ToolError
-
         from linkedin_mcp_server.daemon import liveness as daemon_liveness
+        from linkedin_mcp_server.error_handler import ErrorCodeMiddleware
 
         marker = new_call_id()
         self._headers(monkeypatch, {CALL_HEADER: marker})
@@ -346,10 +345,17 @@ class TestTheOwnerSideMiddleware:
             await asyncio.sleep(3600)  # the read nobody is waiting for
             return "never reached"  # pragma: no cover
 
-        running = asyncio.create_task(
-            OwnerCallLivenessMiddleware().on_call_tool(
-                self._context(),
+        async def owner(context: Any) -> Any:
+            return await OwnerCallLivenessMiddleware().on_call_tool(
+                context,
                 call_next,  # ty: ignore
+            )
+
+        # Through the outermost middleware, so the result is what a client reads.
+        running = asyncio.create_task(
+            ErrorCodeMiddleware().on_call_tool(
+                self._context(),
+                owner,
             )
         )
         await asyncio.wait_for(started.wait(), timeout=5)
@@ -358,8 +364,12 @@ class TestTheOwnerSideMiddleware:
         _last_heard(liveness, marker, EXPIRY_SECONDS + 1)
         assert _scan(liveness) == [marker]
 
-        with pytest.raises(ToolError, match="stopped waiting"):
-            await asyncio.wait_for(running, timeout=5)
+        result = await asyncio.wait_for(running, timeout=5)
+        assert result.is_error is True
+        assert [block.text for block in result.content] == [  # ty: ignore
+            "Stopped because the client that asked for it stopped waiting"
+        ]
+        assert result.meta == {ERROR_META_KEY: {"v": 1, "code": "internal"}}
         assert marker not in _tracked(liveness)
 
     async def test_a_cancellation_from_elsewhere_is_not_swallowed(self, monkeypatch):

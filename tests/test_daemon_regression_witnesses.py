@@ -98,8 +98,6 @@ def test_an_owner_never_names_its_own_group_to_the_guardian(
         raise _Spawned
 
     monkeypatch.setattr(process_tree, "_IS_WINDOWS", False)
-    monkeypatch.setattr(process_tree, "_browser_guardian_process", None)
-    monkeypatch.setattr(process_tree, "_browser_guardian_control_fd", None)
     monkeypatch.setattr(os, "getpid", lambda: 4242)
     monkeypatch.setattr(os, "getpgrp", lambda: 4242, raising=False)
     monkeypatch.setattr(subprocess, "Popen", spawn)

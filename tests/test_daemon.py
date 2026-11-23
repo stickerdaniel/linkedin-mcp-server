@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import logging
 import threading
-import time
 from collections.abc import Callable
 from pathlib import Path
 
@@ -22,6 +21,7 @@ import linkedin_mcp_server.storage_class as storage_class_module
 from linkedin_mcp_server.config.schema import AppConfig
 from linkedin_mcp_server.daemon.discovery import (
     Mismatch,
+    OwnerLookup,
     OwnerState,
     daemon_would_be_used,
     look_up_owner,
@@ -436,29 +436,50 @@ class TestAnOwnerOfAnotherProtocol:
 class TestOneBoundedRead:
     """A profile command reads what is recorded now, and never hangs on it."""
 
+    #: How long the stand-in read stays blocked. Only a lookup that waits for
+    #: the read lasts this long, and then it fails instead of hanging the run.
+    _PARKED = 30.0
+
     def test_a_blocked_descriptor_read_is_bounded(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ):
+        # Asserts the order of events, not a duration: the reader thread starts
+        # and reaches `_inspect` on the host's schedule, which a loaded host
+        # stretches far past a short budget.
         profile = tmp_path / "profile"
         profile.mkdir()
-        blocked = threading.Event()
+        entered = threading.Event()
         release = threading.Event()
+        finished = threading.Event()
+        budgets: list[float] = []
+        inspect_until = daemon_module._DescriptorInspector.inspect_until
 
         def inspect(*_args: object) -> None:
-            blocked.set()
-            release.wait()
+            entered.set()
+            release.wait(self._PARKED)
+            finished.set()
+
+        def bounded(
+            inspector: daemon_module._DescriptorInspector, *, timeout: float
+        ) -> OwnerLookup:
+            budgets.append(timeout)
+            return inspect_until(inspector, timeout=timeout)
 
         monkeypatch.setattr(daemon_module, "_inspect", inspect)
         monkeypatch.setattr(daemon_module, "_DESCRIPTOR_READ_SECONDS", 0.01)
-        started = time.monotonic()
+        monkeypatch.setattr(
+            daemon_module._DescriptorInspector, "inspect_until", bounded
+        )
         try:
             lookup = look_up_owner(tmp_path, profile, _config(profile))
+            abandoned = not finished.is_set()
         finally:
             release.set()
 
-        assert blocked.is_set()
+        assert abandoned, "the lookup waited for the blocked read to finish"
         assert lookup.state is OwnerState.UNTRUSTED
-        assert time.monotonic() - started < 0.1
+        assert budgets == [0.01]
+        assert entered.wait(self._PARKED), "the read was never attempted"
 
 
 class TestTellingTheRefusalsApart:

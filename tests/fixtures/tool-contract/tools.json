@@ -72,7 +72,7 @@
       "destructiveHint": true,
       "openWorldHint": true
     },
-    "description": "Send a LinkedIn connection request or accept an incoming one.\n\nThe tool is annotated with destructiveHint so MCP clients will\nprompt for user confirmation before execution.",
+    "description": "Send a LinkedIn connection request or accept an incoming one.\n\nWhere the client supports elicitation, the user confirms the\ninvitation in the client before anything is sent.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
@@ -383,6 +383,20 @@
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
+        "max_scrolls": {
+          "anyOf": [
+            {
+              "maximum": 12,
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Maximum feed scrolls before returning what has loaded\n(1-12). Default (None) uses 12. Each scroll can wait up to\n~12 s for a new batch, so a lower value returns sooner with\nfewer posts."
+        },
         "num_posts": {
           "default": 10,
           "description": "Number of posts to fetch (1-50, default 10).\n       Posts are loaded in batches of ~5 as the page scrolls,\n       so the actual count may slightly exceed the target.",
@@ -979,7 +993,7 @@
       "openWorldHint": true,
       "readOnlyHint": true
     },
-    "description": "Search for jobs on LinkedIn.\n\nReturns job_ids that can be passed to get_job_details for full info.\n\nLinkedIn is moving accounts to a redesigned job search, which keeps\nonly the keywords, date_posted and paging. It drops the filters\nmarked \"Classic search only\" and reports them in section_errors as\nfilters_dropped. When it drops the location or work type, search again\nwith them in the keywords (\"remote python developer in Lyon\") and keep\ndoing so; words such as \"senior\" or \"internship\" there narrow the\nresults too. Quotes do not make a phrase exact on that search.",
+    "description": "Search for jobs on LinkedIn.\n\nReturns job_ids that can be passed to get_job_details for full info.\n\nLinkedIn is moving accounts to a redesigned job search, which keeps\nonly the keywords, date_posted, easy_apply and paging. It drops the\nfilters marked \"Classic search only\" and reports them in section_errors\nas filters_dropped. When it drops the location or work type, search\nagain with them in the keywords (\"remote python developer in Lyon\") and\nkeep doing so; words such as \"senior\" or \"internship\" there narrow the\nresults too. Quotes do not make a phrase exact on that search.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
@@ -997,7 +1011,7 @@
         },
         "easy_apply": {
           "default": false,
-          "description": "Only show Easy Apply jobs (default false). Classic search only.",
+          "description": "Only show Easy Apply jobs (default false).",
           "type": "boolean"
         },
         "experience_level": {
@@ -1059,6 +1073,12 @@
           "default": null,
           "description": "Sort results (date, relevance). Classic search only."
         },
+        "start": {
+          "default": 0,
+          "description": "Result offset to begin at (default 0). Pass a previous\ncall's pagination.next_offset, with the same search\narguments, to continue where it stopped. Results can shift\nbetween calls, so a continuation may repeat a job id.",
+          "minimum": 0,
+          "type": "integer"
+        },
         "work_type": {
           "anyOf": [
             {
@@ -1101,6 +1121,18 @@
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
+        "connection_of": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional profile id (e.g. \"ACoAAB...\") limiting\nresults to that member's connections. Combine with\nnetwork=[\"F\"] to list the mutual connections you share with\nthem; keywords may be \"\". Take the id from get_person_profile's\n\"profile_urn\"; a vanity name is refused, because LinkedIn\nignores it and returns unfiltered results. LinkedIn also\ndrops the filter, without saying so, when the member is\n3rd-degree or beyond (you share no connections): the result\nis then your unfiltered network, not an empty list."
+        },
         "current_company": {
           "anyOf": [
             {

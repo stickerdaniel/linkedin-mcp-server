@@ -1,0 +1,299 @@
+[
+  {
+    "_meta": {
+      "fastmcp": {
+        "tags": []
+      },
+      "ui": {
+        "visibility": [
+          "app"
+        ]
+      }
+    },
+    "annotations": {
+      "openWorldHint": false,
+      "readOnlyHint": true
+    },
+    "description": "Called by the sign-in view: the grant for the open its result named.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "attempt_id": {
+          "maxLength": 64,
+          "type": "string"
+        },
+        "open_id": {
+          "maxLength": 64,
+          "type": "string"
+        }
+      },
+      "required": [
+        "attempt_id",
+        "open_id"
+      ],
+      "type": "object"
+    },
+    "name": "login_view_attach",
+    "title": "Login View Attach"
+  },
+  {
+    "_meta": {
+      "fastmcp": {
+        "tags": []
+      },
+      "ui": {
+        "visibility": [
+          "app"
+        ]
+      }
+    },
+    "annotations": {
+      "openWorldHint": false,
+      "readOnlyHint": true
+    },
+    "description": "Called by the sign-in view: the page once it differs from frame *after*.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "after": {
+          "default": "",
+          "maxLength": 64,
+          "type": "string"
+        },
+        "attempt_id": {
+          "maxLength": 64,
+          "type": "string"
+        },
+        "budget_s": {
+          "default": 1.5,
+          "maximum": 3.0,
+          "minimum": 0,
+          "type": "number"
+        },
+        "grant": {
+          "maxLength": 128,
+          "type": "string"
+        }
+      },
+      "required": [
+        "grant",
+        "attempt_id"
+      ],
+      "type": "object"
+    },
+    "name": "login_view_frame",
+    "title": "Login View Frame"
+  },
+  {
+    "_meta": {
+      "fastmcp": {
+        "tags": []
+      },
+      "ui": {
+        "visibility": [
+          "app"
+        ]
+      }
+    },
+    "annotations": {
+      "openWorldHint": true,
+      "readOnlyHint": false
+    },
+    "description": "Called by the sign-in view: replay the user's input into the page.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "attempt_id": {
+          "maxLength": 64,
+          "type": "string"
+        },
+        "events": {
+          "items": {
+            "oneOf": [
+              {
+                "additionalProperties": false,
+                "description": "A click at a point given as fractions of the frame, clamped to it.",
+                "properties": {
+                  "button": {
+                    "default": "left",
+                    "enum": [
+                      "left",
+                      "middle",
+                      "right"
+                    ],
+                    "type": "string"
+                  },
+                  "type": {
+                    "const": "click",
+                    "type": "string"
+                  },
+                  "x": {
+                    "type": "number"
+                  },
+                  "y": {
+                    "type": "number"
+                  }
+                },
+                "required": [
+                  "type",
+                  "x",
+                  "y"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "description": "A vertical scroll of *dy* CSS pixels over a point of the frame.",
+                "properties": {
+                  "dy": {
+                    "type": "number"
+                  },
+                  "type": {
+                    "const": "wheel",
+                    "type": "string"
+                  },
+                  "x": {
+                    "type": "number"
+                  },
+                  "y": {
+                    "type": "number"
+                  }
+                },
+                "required": [
+                  "type",
+                  "x",
+                  "y",
+                  "dy"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "description": "A named key, or one character with modifiers for a shortcut.\n\n``Meta`` presses Control on Linux and Command on macOS, so a shortcut a Mac\nuser types does what they meant in the login browser.",
+                "properties": {
+                  "key": {
+                    "maxLength": 16,
+                    "minLength": 1,
+                    "type": "string"
+                  },
+                  "modifiers": {
+                    "items": {
+                      "enum": [
+                        "Alt",
+                        "Control",
+                        "Meta",
+                        "Shift"
+                      ],
+                      "type": "string"
+                    },
+                    "maxItems": 4,
+                    "type": "array"
+                  },
+                  "type": {
+                    "const": "key",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "key"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "description": "Characters typed one by one, as key events.",
+                "properties": {
+                  "text": {
+                    "maxLength": 4096,
+                    "minLength": 1,
+                    "type": "string"
+                  },
+                  "type": {
+                    "const": "type",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "text"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "description": "Text inserted at once, the way a paste lands, for any UTF-8 text.",
+                "properties": {
+                  "text": {
+                    "maxLength": 4096,
+                    "minLength": 1,
+                    "type": "string"
+                  },
+                  "type": {
+                    "const": "paste",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "text"
+                ],
+                "type": "object"
+              }
+            ]
+          },
+          "maxItems": 64,
+          "minItems": 1,
+          "type": "array"
+        },
+        "geometry": {
+          "pattern": "^[0-9]{1,5}x[0-9]{1,5}$",
+          "type": "string"
+        },
+        "grant": {
+          "maxLength": 128,
+          "type": "string"
+        },
+        "page_id": {
+          "maxLength": 16,
+          "type": "string"
+        }
+      },
+      "required": [
+        "grant",
+        "attempt_id",
+        "page_id",
+        "geometry",
+        "events"
+      ],
+      "type": "object"
+    },
+    "name": "login_view_input",
+    "title": "Login View Input"
+  },
+  {
+    "_meta": {
+      "fastmcp": {
+        "tags": [
+          "session"
+        ]
+      },
+      "ui": {
+        "resourceUri": "ui://linkedin-mcp/login.html"
+      }
+    },
+    "annotations": {
+      "destructiveHint": false,
+      "openWorldHint": true,
+      "readOnlyHint": false
+    },
+    "description": "Show the LinkedIn sign-in inside this chat, so the user can sign in there.\n\nCall it when a tool says to call open_login. The user signs in in the\nview; call the original tool again once the view says Signed in.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {},
+      "type": "object"
+    },
+    "name": "open_login",
+    "title": "Sign in to LinkedIn"
+  }
+]

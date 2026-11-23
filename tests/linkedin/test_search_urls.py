@@ -193,7 +193,7 @@ class TestBuildJobSearchUrl:
             sort_by="date",
         ) == (
             f"{JOBS}keywords=python&location=Berlin&f_TPR=r604800&f_JT=F"
-            "&f_E=2,4&f_WT=2&f_EA=true&sortBy=DD"
+            "&f_E=2,4&f_WT=2&f_AL=true&sortBy=DD"
         )
 
     @pytest.mark.parametrize("keywords,encoded", ENCODED_KEYWORDS)
@@ -321,13 +321,13 @@ class TestBuildJobSearchUrl:
         assert parse_qs(urlparse(url).query)["f_WT"] == ["C++"]
 
     def test_a_facet_token_cannot_inject_an_easy_apply_parameter(self):
-        url = build_job_search_url("python", job_type="x&f_EA=true", easy_apply=True)
+        url = build_job_search_url("python", job_type="x&f_AL=true", easy_apply=True)
 
-        assert url == f"{JOBS}keywords=python&f_JT=x%26f_EA%3Dtrue&f_EA=true"
+        assert url == f"{JOBS}keywords=python&f_JT=x%26f_AL%3Dtrue&f_AL=true"
         assert parse_qs(urlparse(url).query) == {
             "keywords": ["python"],
-            "f_JT": ["x&f_EA=true"],
-            "f_EA": ["true"],
+            "f_JT": ["x&f_AL=true"],
+            "f_AL": ["true"],
         }
 
     def test_mixed_work_types_keep_token_order_and_literal_commas(self):
@@ -378,8 +378,10 @@ class TestBuildJobSearchUrl:
         )
 
     def test_easy_apply_true_adds_the_flag(self):
+        # f_AL, never f_EA: f_EA is LinkedIn's "Under 10 applicants" filter,
+        # and a search sent with it is kept, so nothing downstream would notice.
         assert build_job_search_url("python", easy_apply=True) == (
-            f"{JOBS}keywords=python&f_EA=true"
+            f"{JOBS}keywords=python&f_AL=true"
         )
 
     def test_easy_apply_false_omits_the_flag(self):
@@ -405,6 +407,9 @@ class TestBuildJobSearchUrl:
         assert build_job_search_url("python", location="  ") == (
             f"{JOBS}keywords=python&location=++"
         )
+
+
+PROFILE_ID = "ACoAADdZSNYBiaacxEw6je-wVIKjGkKp-it0gD8"
 
 
 class TestBuildPeopleSearchUrl:
@@ -555,6 +560,41 @@ class TestBuildPeopleSearchUrl:
             build_people_search_url(
                 "engineer", location="Berlin", current_company="SAP"
             )
+
+    def test_profile_id_connection_of_becomes_a_json_facet(self):
+        assert build_people_search_url("", network=["F"], connection_of=PROFILE_ID) == (
+            f"{PEOPLE}keywords=&network=%5B%22F%22%5D"
+            f"&connectionOf=%5B%22{PROFILE_ID}%22%5D"
+        )
+
+    def test_full_profile_urn_is_reduced_to_the_id(self):
+        assert build_people_search_url(
+            "", connection_of=f"urn:li:fsd_profile:{PROFILE_ID}"
+        ) == (f"{PEOPLE}keywords=&connectionOf=%5B%22{PROFILE_ID}%22%5D")
+
+    @pytest.mark.parametrize(
+        "value",
+        [
+            # A vanity name: LinkedIn drops it and returns unfiltered results.
+            "williamhgates",
+            "/in/williamhgates/",
+            f"https://www.linkedin.com/in/{PROFILE_ID}/",
+            f" {PROFILE_ID}",
+            "urn:li:fsd_profile:",
+            "urn:li:company:1115",
+        ],
+    )
+    def test_non_profile_id_connection_of_is_refused(self, value: str):
+        with pytest.raises(FilterValidationError) as error:
+            build_people_search_url("", connection_of=value)
+
+        assert repr(value) in str(error.value)
+        assert "LinkedIn profile id" in str(error.value)
+
+    def test_empty_connection_of_is_omitted_rather_than_refused(self):
+        assert build_people_search_url("engineer", connection_of="") == (
+            f"{PEOPLE}keywords=engineer"
+        )
 
     def test_network_is_refused_before_a_company_urn_is_looked_at(self):
         # Order matters for the message a caller reads back: both filters are

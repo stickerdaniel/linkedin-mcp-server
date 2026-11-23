@@ -30,7 +30,7 @@
       },
       "extract_feed": {
         "coroutine": true,
-        "signature": "(self, num_posts: 'int' = 10) -> 'ExtractedSection'"
+        "signature": "(self, num_posts: 'int' = 10, max_scrolls: 'int | None' = None) -> 'ExtractedSection'"
       },
       "extract_page": {
         "coroutine": true,
@@ -114,11 +114,11 @@
       },
       "search_jobs": {
         "coroutine": true,
-        "signature": "(self, keywords: 'str', location: 'str | None' = None, max_pages: 'int' = 3, date_posted: 'str | None' = None, job_type: 'str | None' = None, experience_level: 'str | None' = None, work_type: 'str | None' = None, easy_apply: 'bool' = False, sort_by: 'str | None' = None, tool_timeout: 'float' = 180.0) -> 'dict[str, Any]'"
+        "signature": "(self, keywords: 'str', location: 'str | None' = None, max_pages: 'int' = 3, date_posted: 'str | None' = None, job_type: 'str | None' = None, experience_level: 'str | None' = None, work_type: 'str | None' = None, easy_apply: 'bool' = False, sort_by: 'str | None' = None, tool_timeout: 'float' = 180.0, start: 'int' = 0) -> 'dict[str, Any]'"
       },
       "search_people": {
         "coroutine": true,
-        "signature": "(self, keywords: 'str', location: 'str | None' = None, network: 'list[str] | None' = None, current_company: 'str | None' = None) -> 'dict[str, Any]'"
+        "signature": "(self, keywords: 'str', location: 'str | None' = None, network: 'list[str] | None' = None, current_company: 'str | None' = None, connection_of: 'str | None' = None) -> 'dict[str, Any]'"
       },
       "search_posts": {
         "coroutine": true,
@@ -399,6 +399,20 @@
         "input": {
           "additionalProperties": false,
           "properties": {
+            "max_scrolls": {
+              "anyOf": [
+                {
+                  "maximum": 12,
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Maximum feed scrolls before returning what has loaded\n(1-12). Default (None) uses 12. Each scroll can wait up to\n~12 s for a new batch, so a lower value returns sooner with\nfewer posts."
+            },
             "num_posts": {
               "default": 10,
               "description": "Number of posts to fetch (1-50, default 10).\n       Posts are loaded in batches of ~5 as the page scrolls,\n       so the actual count may slightly exceed the target.",
@@ -784,7 +798,7 @@
             },
             "easy_apply": {
               "default": false,
-              "description": "Only show Easy Apply jobs (default false). Classic search only.",
+              "description": "Only show Easy Apply jobs (default false).",
               "type": "boolean"
             },
             "experience_level": {
@@ -846,6 +860,12 @@
               "default": null,
               "description": "Sort results (date, relevance). Classic search only."
             },
+            "start": {
+              "default": 0,
+              "description": "Result offset to begin at (default 0). Pass a previous\ncall's pagination.next_offset, with the same search\narguments, to continue where it stopped. Results can shift\nbetween calls, so a continuation may repeat a job id.",
+              "minimum": 0,
+              "type": "integer"
+            },
             "work_type": {
               "anyOf": [
                 {
@@ -873,6 +893,18 @@
         "input": {
           "additionalProperties": false,
           "properties": {
+            "connection_of": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Optional profile id (e.g. \"ACoAAB...\") limiting\nresults to that member's connections. Combine with\nnetwork=[\"F\"] to list the mutual connections you share with\nthem; keywords may be \"\". Take the id from get_person_profile's\n\"profile_urn\"; a vanity name is refused, because LinkedIn\nignores it and returns unfiltered results. LinkedIn also\ndrops the filter, without saying so, when the member is\n3rd-degree or beyond (you share no connections): the result\nis then your unfiltered network, not an empty list."
+            },
             "current_company": {
               "anyOf": [
                 {

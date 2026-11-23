@@ -47,7 +47,7 @@ from linkedin_mcp_server.exceptions import (
     ProfileRootRefusedError,
 )
 from linkedin_mcp_server.process_tree import (
-    release_browser_guardian,
+    BrowserGuardian,
     start_browser_guardian,
 )
 from linkedin_mcp_server.profile_lease import ProfileLease, get_profile_lease
@@ -96,6 +96,9 @@ _browser_create_lock = asyncio.Lock()
 # walking that registry, and an instance built outside it would silently keep a
 # parent's kernel lock alive in a child.
 _browser_lease: ProfileLease | None = None
+# The serving browser's own crash guardian, holding the source lease. A pending
+# login in this process has its own, so releasing one never frees the other.
+_browser_guardian: BrowserGuardian | None = None
 # Monotonic timestamp of the last completed tool call, for the idle timer.
 _last_activity: float | None = None
 # Tool calls currently driving the browser. The background handoff poll must not
@@ -699,7 +702,7 @@ async def get_or_create_browser(
 
 async def _create_browser() -> BrowserManager:
     """Create and initialize the singleton (caller holds _browser_create_lock)."""
-    global _browser, _browser_cookie_export_path, _browser_lease
+    global _browser, _browser_cookie_export_path, _browser_lease, _browser_guardian
 
     lease = get_profile_lease()
 
@@ -731,7 +734,7 @@ async def _create_browser() -> BrowserManager:
         took_lease = True
 
     try:
-        start_browser_guardian(lease.guardian_fd())
+        _browser_guardian = start_browser_guardian(lease.guardian_fd())
         browser = await _create_browser_locked()
     except BrowserShutdownUnconfirmedError:
         # A browser from this attempt may still be running on the profile. Keep
@@ -902,6 +905,14 @@ async def _create_browser_locked() -> BrowserManager:
     _browser = browser
     _browser_cookie_export_path = None
     return _browser
+
+
+def release_browser_guardian() -> None:
+    """Release the serving browser's crash guardian, if it has one."""
+    global _browser_guardian
+    guardian, _browser_guardian = _browser_guardian, None
+    if guardian is not None:
+        guardian.release()
 
 
 async def close_browser() -> None:
@@ -1304,11 +1315,12 @@ def reset_browser_for_testing() -> None:
     well would drop one the test never took, and the next test would find a lease
     that reports itself free while the kernel lock is still open.
     """
-    global _browser, _browser_cookie_export_path, _headless
+    global _browser, _browser_cookie_export_path, _headless, _browser_guardian
     global _browser_lease, _last_activity, _calls_in_flight
     _browser = None
     _browser_cookie_export_path = None
     _headless = True
     _browser_lease = None
+    _browser_guardian = None
     _last_activity = None
     _calls_in_flight = 0

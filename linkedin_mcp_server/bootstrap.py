@@ -54,6 +54,8 @@ from linkedin_mcp_server.drivers.browser import (
     get_profile_dir,
     set_headless,
 )
+from linkedin_mcp_server import login_relay
+from linkedin_mcp_server.login_view import LoginAttempt
 from linkedin_mcp_server.exceptions import (
     AuthenticationBootstrapFailedError,
     AuthenticationInProgressError,
@@ -194,7 +196,7 @@ _CREDENTIALS_IN_URL = re.compile(r"[/\\]{2}[^/\\\s]*@")
 #: SECRET`` therefore printed everything from the quote onwards. What the closing
 #: marker actually needs is held back in ``_held_back_closer`` instead, which is
 #: two characters rather than the whole tail.
-_URL_IN_TEXT = re.compile(r"(?i)\b(https?):[/\\]{2}(\S*)")
+_URL_IN_TEXT = re.compile(r"(?i)(https?):[/\\]{2}(\S*)")
 #: Where an authority ends. Backslashes are normalised to slashes first, as Node
 #: does before resolving, so they are not in this class.
 _AUTHORITY_ENDS = re.compile(r"[/?#]")
@@ -208,7 +210,7 @@ _AUTHORITY_ENDS = re.compile(r"[/?#]")
 #: text: a URL run ends at whitespace and a userinfo ends at the first slash as
 #: well, so an opener with either of those between itself and the cut can no
 #: longer reach across it, and the cut in front of it is free.
-_SCHEME_OPENS = re.compile(r"(?i)\bhttps?:[/\\]{2}(?=\S*\Z)")
+_SCHEME_OPENS = re.compile(r"(?i)https?:[/\\]{2}(?=\S*\Z)")
 _CREDENTIAL_OPENS = re.compile(r"[/\\]{2}(?=[^/\\\s]*\Z)")
 #: An opener that has not finished arriving, anchored at the cut. A buffer
 #: ending in ``h`` can be the first character of ``https://SECRET``, and a cut
@@ -216,6 +218,7 @@ _CREDENTIAL_OPENS = re.compile(r"[/\\]{2}(?=[^/\\\s]*\Z)")
 #: yet for anything above to find. Every proper prefix of one is here, which
 #: covers a cut inside a whole opener as the same case.
 _OPENER_PENDING = re.compile(r"(?i)(?:\b(?:h|ht|htt|https?:?[/\\]?)|[/\\])\Z")
+_GLUED_OPENER_PENDING = re.compile(r"(?i)(?:h|ht|htt|https?:?[/\\]?)\Z")
 #: Where a run ends. The ``\S`` of ``_URL_IN_TEXT``, so the two agree on what
 #: one run is.
 _WHITESPACE = re.compile(r"\s")
@@ -365,6 +368,9 @@ class BootstrapState:
     cache_report_task: asyncio.Task[None] | None = None
     cache_report_attempted: bool = False
     login_task: asyncio.Task[None] | None = None
+    #: The attempt ``login_task`` runs, kept after the task ends so a sign-in
+    #: view still reads how it ended.
+    login_attempt: LoginAttempt | None = None
     import_task: asyncio.Task[bool] | None = None
     import_attempted: bool = False
     initialized: bool = False
@@ -391,11 +397,20 @@ _auth_quiescent = False
 #: exactly that), so it cannot double as "not set"; ``_auth_quiescent`` does that.
 _auth_quiescent_generation: str | None = None
 
+#: Distinguishes "no Docker tool has found its session dead" from an observed
+#: generation of ``None``.
+NOT_OBSERVED: object = object()
+#: The saved generation a Docker tool last found dead. Docker cannot start a
+#: login from a tool call, so this is what tells ``open_login`` that files on
+#: disk are a broken session rather than a working one. Never cleared: a later
+#: login writes a new generation, which no longer matches it.
+_docker_dead_generation: str | None | object = NOT_OBSERVED
+
 
 def reset_bootstrap_for_testing() -> None:
     """Reset bootstrap singleton state for test isolation."""
     global _state, _lock, _AUTO_IMPORT_ANNOUNCED
-    global _auth_quiescent, _auth_quiescent_generation
+    global _auth_quiescent, _auth_quiescent_generation, _docker_dead_generation
     for task in (
         _state.setup_task,
         _state.cache_report_task,
@@ -410,6 +425,7 @@ def reset_bootstrap_for_testing() -> None:
     _state.login_supersedes = UNGUARDED
     _auth_quiescent = False
     _auth_quiescent_generation = None
+    _docker_dead_generation = NOT_OBSERVED
     os.environ.pop("PLAYWRIGHT_BROWSERS_PATH", None)
     # Tolerate monkeypatched stand-ins that lack `cache_clear`.
     for cached in (_patchright_install_targets, _patchright_registry_entries):
@@ -827,7 +843,7 @@ def get_bootstrap_state() -> BootstrapState:
     return _state
 
 
-def bootstrap_observation() -> dict[str, str | bool]:
+def bootstrap_observation(*, stored: bool) -> dict[str, str | bool]:
     from linkedin_mcp_server.core.exceptions import AccountRestrictedError
 
     setup = _state.setup_state.value
@@ -849,6 +865,16 @@ def bootstrap_observation() -> dict[str, str | bool]:
             login = "failed" if error is not None else "auth_ready"
             if error is not None:
                 restricted = isinstance(error, AccountRestrictedError)
+    # A login that stood down for a peer, or a session another process logged
+    # out since, leaves nothing on disk; a task's success alone is no session.
+    # *stored* is the caller's one read of the files, so the two fields of a
+    # status cannot disagree.
+    if login == AuthState.READY.value and not stored:
+        login = (
+            AuthState.FAILED.value
+            if task is not None and task.done()
+            else AuthState.IDLE.value
+        )
 
     imported = "not_started"
     import_task = _state.import_task
@@ -3469,7 +3495,9 @@ def _forced_fragment(text: str, cut: int) -> tuple[str, str, bool]:
         return _OMITTED_RUN_HEAD, remaining, running
     # Whichever of the two opens first, and never at zero: an opener there that
     # reached this line is the ordinary-output case, which keeps the plain cut.
-    stops = [start for start in (pending, opened) if start]
+    glued = _GLUED_OPENER_PENDING.search(text, 0, cut)
+    held = None if glued is None else glued.start()
+    stops = [start for start in (pending, opened, held) if start]
     stop = min(stops) if stops else cut
     return text[:stop], text[stop:], False
 
@@ -3505,7 +3533,7 @@ class _RedactedTail:
     def finish(self) -> str:
         """The retained text, redacted, with a partial character resolved."""
         self._append(self._decoder.decode(b"", final=True))
-        self._bound()
+        self._bound(final=True)
         return self._text
 
     def _append(self, decoded: str) -> None:
@@ -3516,7 +3544,7 @@ class _RedactedTail:
             decoded, self._dropping = _dropped_run(decoded)
         self._text += decoded
 
-    def _bound(self) -> None:
+    def _bound(self, final: bool = False) -> None:
         """Redact, then trim, and never in the other order.
 
         Deferred until a trim is due or the text is asked for, because text only
@@ -3529,6 +3557,8 @@ class _RedactedTail:
             return
         cut = len(self._text) - self._limit
         opening = _run_opening(self._text, cut)
+        if final and opening is not None and opening.re is _OPENER_PENDING:
+            opening = None
         # A configured mirror value that is still arriving is a secret this trim
         # would behead: the part that names it is in front of the cut and the
         # private path is behind it, and the exact replacement above can never
@@ -3536,7 +3566,8 @@ class _RedactedTail:
         # so it is looked up by name.
         pending = _pending_value_start(self._text, cut)
         if pending is None and (opening is None or not _is_a_url(opening)):
-            self._text = self._text[cut:]
+            glued = None if final else _GLUED_OPENER_PENDING.search(self._text, 0, cut)
+            self._text = self._text[cut if glued is None else glued.start() :]
             return
         # Keeping a tail means dropping heads, and the head of a URL is the part
         # that names it. What a cut here would leave prints as ordinary text, so
@@ -3935,8 +3966,15 @@ async def _refresh_background_task_state() -> None:
             _state.account_restricted = isinstance(exc, AccountRestrictedError)
             logger.warning("LinkedIn login bootstrap failed: %s", exc)
         else:
-            _state.auth_state = AuthState.READY
-            _state.auth_completed_at = utcnow_iso()
+            # Success is the session on disk now. A login that stood down for a
+            # peer reports success too, and a logout since can have removed
+            # what that peer published.
+            if _auth_ready():
+                _state.auth_state = AuthState.READY
+                _state.auth_completed_at = utcnow_iso()
+            else:
+                _state.auth_state = AuthState.FAILED
+                _state.last_error = "No LinkedIn session is available; sign in again."
 
     # Read from the finished import itself, not only from whichever caller
     # awaited it: a poller that sees the import done, or runs after that caller
@@ -3998,7 +4036,7 @@ async def ensure_tool_ready_or_raise(
     _raise_if_auth_quiescent()
 
     if get_runtime_policy() == RuntimePolicy.DOCKER:
-        _raise_if_docker_auth_missing()
+        _raise_if_docker_auth_missing(ctx)
         return
 
     if _uses_custom_chrome():
@@ -4043,14 +4081,55 @@ async def ensure_tool_ready_or_raise(
     await _start_login_if_needed(ctx, superseded_by=current_login_generation())
 
 
-def _raise_if_docker_auth_missing() -> None:
-    if _auth_ready():
-        return
-    raise DockerHostLoginRequiredError(
+def docker_auth_remedy(ctx: Context | None) -> str:
+    """What a Docker tool without a working session tells the client to do.
+
+    A client that can show the sign-in view is sent to ``open_login``; any
+    other one gets the commands that sign in outside the chat.
+    """
+    from linkedin_mcp_server.login_app import view_available
+
+    if view_available(ctx):
+        return (
+            "No valid LinkedIn session is available. Call open_login to sign in "
+            "inside this chat, then retry this tool."
+        )
+    return (
         "No valid LinkedIn session is available in Docker. Create one with "
         "the explicit --login --login-viewer Docker command, or run --login "
         "on the host, then retry this tool."
     )
+
+
+def _raise_if_docker_auth_missing(ctx: Context | None = None) -> None:
+    if _auth_ready():
+        return
+    raise DockerHostLoginRequiredError(docker_auth_remedy(ctx))
+
+
+def record_docker_dead_session(generation: str | None) -> None:
+    """Remember that a Docker tool found the saved *generation* dead."""
+    global _docker_dead_generation
+    _docker_dead_generation = generation
+
+
+def docker_dead_generation() -> str | None | object:
+    """The recorded dead generation while it is still the saved one.
+
+    :data:`NOT_OBSERVED` when no Docker tool found a dead session, or when the
+    one it found has since been replaced. Rotation removes the source state
+    for a moment, and the record survives that, because a login that fails
+    restores the same generation and the view has to retire it again.
+    """
+    recorded = _docker_dead_generation
+    if recorded is NOT_OBSERVED or recorded != current_login_generation():
+        return NOT_OBSERVED
+    return recorded
+
+
+def session_files_ready() -> bool:
+    """Whether a session's files are on disk, which says nothing about whether it works."""
+    return _auth_ready()
 
 
 def _auth_ready(profile_dir: Path | None = None) -> bool:
@@ -4262,7 +4341,10 @@ async def _try_auto_import_session(ctx: Context | None = None) -> bool:
 
 
 async def _start_login_if_needed(
-    ctx: Context | None = None, *, superseded_by: str | None | object = UNGUARDED
+    ctx: Context | None = None,
+    *,
+    superseded_by: str | None | object = UNGUARDED,
+    inline_wait: bool = True,
 ) -> None:
     if process_role() is ServerRole.OWNER:
         # Ahead of the lock, and ahead of every branch below, because all of them
@@ -4360,7 +4442,9 @@ async def _start_login_if_needed(
         # Import resolved without a session -> manual-login path. Re-enter:
         # import_attempted is now True and import_task is done, so this call
         # takes the spawn/await-login branch (no recursion loop risk).
-        return await _start_login_if_needed(ctx, superseded_by=superseded_by)
+        return await _start_login_if_needed(
+            ctx, superseded_by=superseded_by, inline_wait=inline_wait
+        )
 
     # No import in flight and none claimed -> the #535 manual-login + inline-wait
     # fallback. Spawn the login task if one is not already shared.
@@ -4377,20 +4461,19 @@ async def _start_login_if_needed(
                 prior_error = None
             else:
                 prior_error = _state.last_error
-                _move_invalid_auth_state_aside(superseded_by)
                 _state.auth_state = AuthState.STARTING
                 _state.auth_started_at = utcnow_iso()
                 _state.last_error = None
                 _state.auth_completed_at = None
                 _state.login_supersedes = superseded_by
-                _state.login_task = asyncio.create_task(
-                    _run_login_flow(), name="linkedin-login"
-                )
+                _state.login_task = _start_login_attempt()
                 login_task = _state.login_task
 
     # ---- #535 inline wait: unchanged logic ----
+    # A caller showing the login in a view returns at once; it has nothing to
+    # resume, and the user signs in while the call is long over.
     budget = get_config().browser.login_inline_wait_seconds
-    if budget and budget > 0:
+    if inline_wait and budget and budget > 0:
         # asyncio.wait (NOT wait_for) leaves the task RUNNING on timeout; a
         # budget-elapsed wait must never cancel the in-progress login browser.
         await asyncio.wait({login_task}, timeout=budget)
@@ -4417,10 +4500,101 @@ async def _start_login_if_needed(
 
 
 async def start_login_if_needed(
-    ctx: Context | None = None, *, superseded_by: str | None | object = UNGUARDED
+    ctx: Context | None = None,
+    *,
+    superseded_by: str | None | object = UNGUARDED,
+    inline_wait: bool = True,
 ) -> None:
-    """Public wrapper for starting the shared login workflow."""
-    await _start_login_if_needed(ctx, superseded_by=superseded_by)
+    """Public wrapper for starting the shared login workflow.
+
+    *inline_wait* ``False`` skips only the wait for the login itself; a running
+    auto-import is still awaited, since its result decides whether a login
+    starts at all.
+    """
+    await _start_login_if_needed(
+        ctx, superseded_by=superseded_by, inline_wait=inline_wait
+    )
+
+
+def _start_login_attempt() -> asyncio.Task[None]:
+    """Claim a new attempt and start the login task it settles from.
+
+    Called with ``_lock`` held, at every place that claims the shared task.
+    """
+    attempt = LoginAttempt()
+    _state.login_attempt = attempt
+    task = attempt.start(_run_login_flow(), name="linkedin-login")
+    # Listening before any open_login returns this attempt's id, so a view in
+    # another server process can reach it at once. Never raises.
+    login_relay.serve(attempt, task)
+    return task
+
+
+def running_login_attempt() -> LoginAttempt | None:
+    """The attempt of the login task running now, if one is."""
+    task = _state.login_task
+    if task is None or task.done():
+        return None
+    return _state.login_attempt
+
+
+def current_login_attempt() -> LoginAttempt | None:
+    """The attempt of the most recent login task, running or ended."""
+    return _state.login_attempt
+
+
+async def stop_login() -> None:
+    """Cancel this process's login and auto-import, and await their cleanup.
+
+    The server lifespan calls this before it closes the runtime browser, so a
+    login, which nothing else ends while ``LOGIN_TIMEOUT`` is 0, ends with the
+    server. The view closes first, so nothing reads or types into the browser
+    while it tears down. Cleanup is awaited rather than abandoned: the login may
+    have retired the previous session and has to restore it under the profile
+    it holds.
+    """
+    attempt = _state.login_attempt
+    if attempt is not None:
+        attempt.close_view()
+    try:
+        await _stop_login_tasks()
+    finally:
+        # Last, and also when no login runs: an ended attempt's relay still
+        # serves its status tail. A relay that fails to close never replaces
+        # the login's own result.
+        try:
+            await login_relay.close_all()
+        except Exception:
+            logger.warning("The sign-in view relay did not close", exc_info=True)
+
+
+async def _stop_login_tasks() -> None:
+    tasks = [
+        task
+        for task in (_state.login_task, _state.import_task)
+        if task is not None and not task.done()
+    ]
+    if not tasks:
+        return
+    for task in tasks:
+        task.cancel()
+    caller_cancel: asyncio.CancelledError | None = None
+    for task in tasks:
+        while not task.done():
+            try:
+                await asyncio.shield(task)
+            except asyncio.CancelledError as exc:
+                caller = asyncio.current_task()
+                if caller is not None and caller.cancelling():
+                    caller_cancel = exc
+                elif task.done():
+                    break
+            except Exception:
+                # Its own failure, reported by the reconciliation below.
+                break
+    await _refresh_background_task_state()
+    if caller_cancel is not None:
+        raise caller_cancel
 
 
 async def wait_for_login_to_finish(timeout: float) -> bool:
@@ -4614,12 +4788,12 @@ async def invalidate_auth_and_trigger_relogin(
         # for 1.5 seconds, this raised "the browser profile is in use" and the
         # 60-second wait was never reached.
         #
-        # The rotation itself is not lost. `interactive_login` rotates under the
-        # profile it waited for (`setup.py`, `rotate_shielded`), which is the
-        # better place for it anyway: this one runs without holding anything, so
-        # its result was never guaranteed to survive to the login. What is lost by
-        # skipping it is only that `_auth_ready()` keeps reporting the dead
-        # session until the login retires it. On a shared owner the quiescence
+        # The rotation itself is not lost. The login's promotion rotates under
+        # the source lease (`login_attempt.promote`), which is the better place
+        # for it anyway: this one runs without holding anything, so its result
+        # was never guaranteed to survive to the login. What is lost by skipping
+        # it is only that `_auth_ready()` keeps reporting the dead session until
+        # the login retires it. On a shared owner the quiescence
         # latch closes that window. On a single-process server nothing does, and
         # it does not need to: the same call is already committed to starting a
         # login, and the login retires the state itself once it holds the
@@ -4649,9 +4823,7 @@ async def invalidate_auth_and_trigger_relogin(
         _state.account_restricted = False
         _state.auth_completed_at = None
         _state.login_supersedes = stale_generation
-        _state.login_task = asyncio.create_task(
-            _run_login_flow(), name="linkedin-login"
-        )
+        _state.login_task = _start_login_attempt()
 
     if ctx is not None:
         await ctx.report_progress(
@@ -4712,12 +4884,6 @@ def _force_move_auth_state_aside(
 ) -> None:
     """Move auth artifacts aside unconditionally (no ``_auth_ready()`` guard)."""
     _move_auth_state_aside(force=True, superseded_by=superseded_by)
-
-
-def _move_invalid_auth_state_aside(
-    superseded_by: str | None | object = UNGUARDED,
-) -> None:
-    _move_auth_state_aside(force=False, superseded_by=superseded_by)
 
 
 async def _run_login_flow() -> None:

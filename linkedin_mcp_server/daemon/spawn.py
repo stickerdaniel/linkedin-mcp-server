@@ -828,7 +828,14 @@ def _spawn_command(*, job_name: str | None = None) -> list[str]:
 #: every setting on standard input, and its environment stays readable
 #: (``/proc/<pid>/environ``, ``ps e``) for its whole lifetime. ``PROXY_SERVER``
 #: belongs here because its documented form may embed ``user:password@``.
-_SECRETS_TO_DROP = ("PROXY_PASSWORD", "PROXY_USERNAME", "PROXY_SERVER")
+#: ``LINKEDIN_MCP_HTTP_TOKEN`` guards a frontend's HTTP listener, which the
+#: owner never runs.
+_SECRETS_TO_DROP = (
+    "PROXY_PASSWORD",
+    "PROXY_USERNAME",
+    "PROXY_SERVER",
+    "LINKEDIN_MCP_HTTP_TOKEN",
+)
 
 
 def _owner_environment() -> dict[str, str]:

@@ -203,6 +203,13 @@
       "url": "https://github.com/giampaolo/psutil",
       "branch": "master",
       "specialNotes": "Dev only. The differential harness's process watcher samples the process table with it (tests/differential/watcher.py)."
+    },
+    {
+      "type": "git",
+      "name": "hypothesis",
+      "url": "https://github.com/HypothesisWorks/hypothesis",
+      "branch": "master",
+      "specialNotes": "Dev only. Property-based tests; settings profiles are registered in tests/conftest.py. The Python package lives under hypothesis-python/."
     }
   ]
 }

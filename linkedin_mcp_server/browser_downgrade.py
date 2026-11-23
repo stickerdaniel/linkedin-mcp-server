@@ -101,10 +101,10 @@ _VERSION = re.compile(r"(?:^|(?<=\s))\d+(?:\.\d+){2,}")
 #: depends on the patchright they resolved and on their platform. From the
 #: driver's own `DOWNLOAD_PATHS`:
 #:
-#: * at the lock (patchright 1.63.0, revision 1243) every target, Linux arm64
-#:   included, is `cftUrl(...)`, which unpacks to `chrome-linux64/`,
-#:   `chrome-linux-arm64/` or `Google Chrome for Testing.app` and reports
-#:   `Google Chrome for Testing`
+#: * at the lock (patchright 1.64.4, revision 1248, the same table as 1.63.0)
+#:   every target, Linux arm64 included, is `cftUrl(...)`, which unpacks to
+#:   `chrome-linux64/`, `chrome-linux-arm64/` or `Google Chrome for
+#:   Testing.app` and reports `Google Chrome for Testing`
 #: * through patchright 1.61.2, every supported `ubuntu*-arm64` and
 #:   `debian*-arm64` was `chromium-linux-arm64.zip`, which unpacks to
 #:   `chrome-linux/` and reports `Chromium`
@@ -155,8 +155,8 @@ _VERSION = re.compile(r"(?:^|(?<=\s))\d+(?:\.\d+){2,}")
 #: nothing about which browser is inside. Binaries run directly: revision
 #: 1194 ->
 #: `Chromium 141.0.7390.37`, revision 1200 -> `Google Chrome for Testing
-#: 143.0.7499.4`, and revisions 1217, 1223, 1228 and 1243 -> `Google Chrome for
-#: Testing`, all on macOS arm64. On Linux arm64 the container reported
+#: 143.0.7499.4`, and revisions 1217, 1223, 1228, 1243 and 1248 -> `Google Chrome
+#: for Testing`, all on macOS arm64. On Linux arm64 the container reported
 #: `Chromium 148.0.7778.0` at revision 1223 -- the same revision that reports
 #: `Google Chrome for Testing 148.0.7778.96` on macOS. One revision, two names,
 #: decided by the platform: that pair is the clearest statement of the rule.
@@ -167,9 +167,11 @@ _VERSION = re.compile(r"(?:^|(?<=\s))\d+(?:\.\d+){2,}")
 #: 140.0.7339.16`, exactly as macOS does -- so at the floor there is no
 #: platform split at all. At revision 1228 (patchright 1.61.2) linux-x64
 #: reports `Google Chrome for Testing 149.0.7827.55` while linux-arm64 reports
-#: `Chromium 149.0.7827.0`, note the differing final component. At the lock
-#: (revision 1243) both images report `Google Chrome for Testing
-#: 153.0.8010.12`, and so does macOS arm64. Windows never answers:
+#: `Chromium 149.0.7827.0`, note the differing final component. At revision
+#: 1243 (patchright 1.63.0) both images report `Google Chrome for Testing
+#: 153.0.8010.12`, and so does macOS arm64. At the lock (revision 1248) macOS
+#: arm64 reports `Google Chrome for Testing 156.0.8078.4`; the images were not
+#: measured there. Windows never answers:
 #: :func:`a_version_can_be_asked_for` refuses before any binary is asked.
 #:
 #: The third entry is not a managed browser at all. `Google Chrome

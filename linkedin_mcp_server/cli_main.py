@@ -382,6 +382,24 @@ def clear_profile_and_exit() -> None:
         or portable_cookie_path(get_profile_dir()).exists()
         or source_state_path(get_profile_dir()).exists()
     ):
+        # A login can be open while the source is empty, and its session must
+        # not land after this logout. Rechecked under the lease: a session that
+        # appeared since the check above was never offered for deletion.
+        try:
+            advanced = session_state.advance_logout_epoch(
+                get_profile_dir(),
+                expect_empty=True,
+                wait_seconds=PROFILE_HANDOVER_WAIT_SECONDS,
+            )
+        except (RuntimeError, OSError) as e:
+            print(f"❌ {e}")
+            sys.exit(1)
+        if not advanced:
+            print(
+                "❌ A session was saved while logging out; run --logout again "
+                "to clear it."
+            )
+            sys.exit(1)
         print("ℹ️  No authentication state found")
         print("Nothing to clear.")
         sys.exit(0)
@@ -917,11 +935,20 @@ def main(argv: Sequence[str] | None = None) -> None:
             # Create and run the MCP server
             from linkedin_mcp_server.daemon.discovery import Unanswered
 
+            # Only an HTTP listener has clients to authenticate. Under stdio
+            # the client is the process that started this one.
+            http_token = (
+                config.server.http_token if transport == "streamable-http" else None
+            )
             if shared is None:
-                mcp = create_mcp_server(tool_timeout=config.server.tool_timeout_seconds)
+                mcp = create_mcp_server(
+                    tool_timeout=config.server.tool_timeout_seconds,
+                    http_token=http_token,
+                )
             elif isinstance(shared, Unanswered):
                 mcp = create_mcp_server(
                     tool_timeout=config.server.tool_timeout_seconds,
+                    http_token=http_token,
                     silent_owner=shared,
                 )
             else:

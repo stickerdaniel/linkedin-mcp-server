@@ -1335,3 +1335,45 @@ class TestTheMainTextWaitAgainstRealDom:
             )
 
         assert "Messaging inbox content did not appear" in caplog.text
+
+
+class TestPageTimeZone:
+    """The zone program runs in the page and reads the browser's own zone.
+
+    The context is given a zone here only to have a known answer; production
+    never sets one, so the page reports whatever the host or container runs
+    in, and that is the zone LinkedIn renders message times in.
+    """
+
+    @pytest.mark.parametrize(
+        "zone,names,offset",
+        [
+            # Chromium names Asia/Kolkata by its older link, Asia/Calcutta.
+            ("Asia/Kolkata", {"Asia/Kolkata", "Asia/Calcutta"}, "+05:30"),
+            ("America/Caracas", {"America/Caracas"}, "-04:00"),
+            # A zero offset comes back from the page as -0, a float.
+            ("UTC", {"UTC"}, "+00:00"),
+            ("Africa/Abidjan", {"Africa/Abidjan"}, "+00:00"),
+        ],
+    )
+    async def test_the_page_reports_the_zone_it_renders_in(
+        self, dom_page, zone: str, names: set[str], offset: str
+    ):
+        browser = dom_page.context.browser
+        assert browser is not None
+        context = await browser.new_context(timezone_id=zone)
+        try:
+            page = await context.new_page()
+            await serve(page, sidebar([("Ada Lovelace", "2-ada")]))
+
+            result = await _reader(page)._add_time_zone(
+                {"url": BASE_URL, "sections": {"inbox": "Ada Lovelace 8:20 PM"}}
+            )
+        finally:
+            await context.close()
+
+        reported = result["time_zone"]
+        assert reported["utc_offset"] == offset
+        # The name is what a caller converts with, so it must name this zone.
+        # A zone that only shares today's offset converts older times wrongly.
+        assert reported["id"] in names

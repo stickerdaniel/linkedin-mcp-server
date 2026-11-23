@@ -231,11 +231,9 @@ def sample_guardian_loss_progress(
         # read, so ask its retained handle again before stamping the lease.
         # A guardian seen gone here makes one consistent observation of exit
         # and acquisition, which is the claim; the kernel's order of the two
-        # was never sampled. A handle not yet signalled fails the measurement
-        # and is recorded so that no later exit can make the pair look
-        # ordered. It is not proof that guardian code still ran: Windows may
-        # release the lock during process rundown before the process object
-        # signals, and this sample cannot tell those apart.
+        # was never sampled. A guardian still active here fails the
+        # measurement and is recorded so that no later exit can make the pair
+        # look ordered.
         if "guardian_exit_observed_ns" not in observation:
             if guardian_active():
                 observation["lease_observed_ns"] = clock_ns()
@@ -787,6 +785,15 @@ def _is_active(handle: Any) -> bool:
     raise RuntimeError(f"WaitForSingleObject returned {result}")
 
 
+def _has_live_thread(handle: Any) -> bool:
+    # Not _is_active: Windows sets the exit code, closes the handles (which
+    # frees a LockFileEx lease), and only then signals the process object.
+    # Measured on windows-latest 180 of 180 times, 2026-11-22.
+    _win32api, win32con, _win32event, _win32job = _windows_modules()
+    win32process = importlib.import_module("win32process")
+    return win32process.GetExitCodeProcess(handle) == win32con.STILL_ACTIVE
+
+
 def _launch_owner(
     scenario: str,
     root: Path,
@@ -870,9 +877,14 @@ def _run_probe(scenario: str, root: Path) -> dict[str, Any]:
             guardian_armed = win32event.CreateEvent(
                 None, True, False, guardian_armed_name
             )
+            guardian_python, guardian_env = probe_python_invocation(
+                sys.executable,
+                getattr(sys, "_base_executable", sys.executable),
+                os.environ,
+            )
             guardian = subprocess.Popen(
                 [
-                    sys.executable,
+                    guardian_python,
                     str(Path(__file__).resolve()),
                     "guardian",
                     str(root / "auth"),
@@ -888,9 +900,13 @@ def _run_probe(scenario: str, root: Path) -> dict[str, Any]:
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
+                env=guardian_env,
             )
             guardian_handle = _process_handle(
-                guardian.pid, win32con.PROCESS_TERMINATE | win32con.SYNCHRONIZE
+                guardian.pid,
+                win32con.PROCESS_TERMINATE
+                | win32con.SYNCHRONIZE
+                | win32con.PROCESS_QUERY_LIMITED_INFORMATION,
             )
             _wait(
                 guardian_ready,
@@ -1076,7 +1092,7 @@ def _run_probe(scenario: str, root: Path) -> dict[str, Any]:
                     guardian_loss_observation,
                     termination_requested_ns=guardian_termination_requested_ns,
                     lease_acquired_ns=observed_lease_acquired_ns,
-                    guardian_active=lambda: _is_active(guardian_handle),
+                    guardian_active=lambda: _has_live_thread(guardian_handle),
                     lease_signaled=lambda: not _is_active(lease_acquired_event),
                     owner_active=lambda: _is_active(owner_handle),
                     active_descendants=lambda: sum(
@@ -2563,7 +2579,11 @@ def retain_stable_browser_inventory[T](
     wait_for_retry: Callable[[], None],
     monotonic: Callable[[], float] = time.monotonic,
 ) -> tuple[dict[int, str], dict[int, T]]:
-    """Retain one quiescent two-sided census under a single deadline."""
+    """Retain one quiescent two-sided census under a single deadline.
+
+    A member gone before ``OpenProcess``, or one ``validate_handle`` reports
+    as ``CensusMemberExitedError``, restarts the census from fresh inventories.
+    """
     while True:
         provisional: dict[int, T] = {}
         first_error: BaseException | None = None
@@ -2580,15 +2600,23 @@ def retain_stable_browser_inventory[T](
                     vanished = exc
                     break
                 provisional[pid] = handle
-                validate_handle(pid, handle)
+                try:
+                    validate_handle(pid, handle)
+                except CensusMemberExitedError as exc:
+                    vanished = exc
+                    break
             if vanished is None:
                 cdp_b = normalize_cdp_processes(sample_cdp())
                 job_b = sample_job_pids()
                 if cdp_a == cdp_b and job_a == job_b == set(provisional):
                     require_browser_inventory(cdp_b, set(provisional), driver_pid)
-                    for pid, handle in provisional.items():
-                        validate_handle(pid, handle)
-                    return cdp_b, provisional
+                    try:
+                        for pid, handle in provisional.items():
+                            validate_handle(pid, handle)
+                    except CensusMemberExitedError as exc:
+                        vanished = exc
+                    else:
+                        return cdp_b, provisional
         except BaseException as exc:
             first_error = exc
         if first_error is not None:
@@ -2630,6 +2658,44 @@ def _member_exited_before_open(exc: BaseException, pid: int) -> bool:
         and getattr(exc, "funcname", None) == "OpenProcess"
         and getattr(exc, "winerror", None) == _ERROR_INVALID_PARAMETER
     )
+
+
+class CensusMemberExitedError(Exception):
+    """A Job member exited while the census held its handle: churn."""
+
+
+_ERROR_ACCESS_DENIED = 5
+_EXITING_MEMBER_SECONDS = 5.0
+
+
+def require_census_image_path(
+    pid: int,
+    query: Callable[[], str],
+    *,
+    wait_exited: Callable[[float], bool],
+    deadline: float,
+    monotonic: Callable[[], float] = time.monotonic,
+) -> str:
+    """Read a member's image path, or prove the member exited instead.
+
+    ``QueryFullProcessImageNameW`` answered ERROR_ACCESS_DENIED in CI for a
+    member whose handle had just tested unsignalled, the state of a process
+    whose exit has begun. Only a member that then signals within a bounded
+    wait counts as churn; one that stays live keeps the refusal fatal.
+    """
+    try:
+        return query()
+    except OSError as exc:
+        if getattr(exc, "winerror", None) != _ERROR_ACCESS_DENIED:
+            raise
+        bound = min(_EXITING_MEMBER_SECONDS, deadline - monotonic())
+        if bound > 0 and wait_exited(bound):
+            raise CensusMemberExitedError(
+                f"Job member {pid} exited during census"
+            ) from exc
+        raise RuntimeError(
+            f"image path of live Job member {pid} was refused: {exc}"
+        ) from exc
 
 
 def wait_handles_to_deadline[T](
@@ -4330,6 +4396,8 @@ async def _browser_launch_owner(root: Path, controls: dict[str, str]) -> int:
     import patchright
     from patchright.async_api import async_playwright
 
+    from linkedin_mcp_server import process_tree
+
     ignored_node_override = os.environ.pop("PLAYWRIGHT_NODEJS_PATH", None)
     expected_node = Path(patchright.__file__).parent / "driver" / "node.exe"
     _win32api, _win32con, _win32event, win32job = _windows_modules()
@@ -4343,7 +4411,7 @@ async def _browser_launch_owner(root: Path, controls: dict[str, str]) -> int:
     driver = await asyncio.wait_for(
         async_playwright().start(), _remaining_browser_seconds(deadline)
     )
-    process = driver._impl_obj._connection._transport._proc
+    process = process_tree._patchright_driver_process(driver)
     node_handle = _asyncio_process_handle(process)
     win32job.AssignProcessToJobObject(inner, node_handle)
     node_pid = int(process.pid)
@@ -4418,7 +4486,7 @@ async def _browser_launch_owner(root: Path, controls: dict[str, str]) -> int:
 def _browser_launch_guardian(root: Path, controls: dict[str, str]) -> int:
     from linkedin_mcp_server.profile_lease import ProfileLease
 
-    win32api, win32con, _win32event, win32job = _windows_modules()
+    win32api, win32con, win32event, win32job = _windows_modules()
     win32process = importlib.import_module("win32process")
 
     deadline = time.monotonic() + _BROWSER_DEADLINE_SECONDS
@@ -4490,12 +4558,22 @@ def _browser_launch_guardian(root: Path, controls: dict[str, str]) -> int:
             if int(win32process.GetProcessId(handle)) != pid:
                 raise RuntimeError("retained handle PID changed")
             if not _is_active(handle):
-                raise RuntimeError("retained Job member exited during census")
+                raise CensusMemberExitedError(
+                    "retained Job member exited during census"
+                )
             if not win32job.IsProcessInJob(
                 handle, inner
             ) or not win32job.IsProcessInJob(handle, outer):
                 raise RuntimeError("retained process left a required Job")
-            path = _full_process_image_path(handle)
+            path = require_census_image_path(
+                pid,
+                lambda: _full_process_image_path(handle),
+                wait_exited=lambda seconds: (
+                    win32event.WaitForSingleObject(handle, int(seconds * 1000))
+                    == _WAIT_OBJECT_0
+                ),
+                deadline=deadline,
+            )
             created = win32process.GetProcessTimes(handle)["CreationTime"]
             if not path or created is None:
                 raise RuntimeError("retained process identity is incomplete")

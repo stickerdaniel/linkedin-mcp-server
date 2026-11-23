@@ -65,6 +65,27 @@ def test_security_floors_are_published() -> None:
     assert _minimum(development["virtualenv"]) >= Version("21.14.9")
 
 
+@pytest.mark.parametrize("name", ["fastmcp", "httpx2", "mcp"])
+def test_the_mcp_ecosystem_stops_at_the_next_minor(name: str) -> None:
+    """`uvx` installs the newest release the declared range allows.
+
+    A range that admits the next minor ships it to users before the
+    forwarder-compat run on its Renovate pull request has seen it.
+    """
+    pyproject = tomllib.loads(
+        (_REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8")
+    )
+    requirement = next(
+        requirement
+        for requirement in map(Requirement, pyproject["project"]["dependencies"])
+        if canonicalize_name(requirement.name) == name
+    )
+    floor = _minimum(requirement)
+    next_minor = Version(f"{floor.major}.{floor.minor + 1}.0")
+
+    assert not requirement.specifier.contains(next_minor)
+
+
 def test_the_suite_runs_without_the_camelcase_bridge() -> None:
     """The SDK v2 names are the only ones that resolve during the run.
 

@@ -209,6 +209,42 @@ class TestBuildReferences:
 
         assert normalize_url(nested) == target
 
+    def test_normalize_url_unwraps_redirect_without_trailing_slash(self):
+        # LinkedIn writes this form too: uBlock Origin's linkedin.com rule
+        # matches `a[href^="https://www.linkedin.com/redir/redirect?url=http"]`.
+        href = (
+            "https://www.linkedin.com/redir/redirect"
+            "?url=https%3A%2F%2Fgatesnot.es%2Ftgn&urlhash=abc"
+        )
+
+        assert normalize_url(href) == "https://gatesnot.es/tgn"
+
+    @pytest.mark.parametrize("path", ["/safety/go/", "/safety/go"])
+    def test_normalize_url_unwraps_safety_redirect(self, path):
+        # An external posting's Apply link takes this form (job_policy.py).
+        href = f"https://www.linkedin.com{path}?url=https%3A%2F%2Fgrnh.se%2Fabc"
+
+        assert normalize_url(href) == "https://grnh.se/abc"
+
+    def test_references_keep_link_behind_safety_redirect(self):
+        assert build_references(
+            [
+                {
+                    "href": "https://www.linkedin.com/safety/go/"
+                    "?url=https%3A%2F%2Facme.example%2Fcareers",
+                    "text": "Acme careers",
+                }
+            ],
+            "about",
+        ) == [
+            {
+                "kind": "external",
+                "url": "https://acme.example/careers",
+                "text": "Acme careers",
+                "context": "top card",
+            }
+        ]
+
     def test_normalize_url_drops_redirect_chain_beyond_cap(self):
         target = "https://example.com/report"
         href = target
@@ -218,6 +254,27 @@ class TestBuildReferences:
             )
 
         assert normalize_url(href) is None
+
+    @pytest.mark.parametrize(
+        "target",
+        [
+            "https://en.wikipedia.org/wiki/What%3F",
+            "https://example.com/notes%23draft",
+            "https://example.com/docs/a%2Fb",
+            "https://example.com/My%20CV.pdf",
+        ],
+    )
+    def test_normalize_url_keeps_the_escapes_of_a_redirect_target(self, target):
+        # The url parameter carries the target encoded once, and reading the
+        # query decodes it once. Decoding again turned an escaped "?" or "#"
+        # into a delimiter and cut the path short.
+        href = (
+            "https://www.linkedin.com/redir/redirect/?url="
+            + quote(target, safe="")
+            + "&urlhash=abc"
+        )
+
+        assert normalize_url(href) == target
 
     def test_prefers_shorter_clean_label_over_merged_visible_text(self):
         references = build_references(

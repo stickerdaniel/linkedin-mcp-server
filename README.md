@@ -17,29 +17,29 @@ Give your AI agents access to LinkedIn through your own browser session. Read pr
 <details open>
 <summary><strong>LinkedIn MCP Sponsor</strong></summary>
 <br/>
-<a href="https://linkupapi.com/?utm_source=stickerdaniel" target="_blank">
+<a href="https://golink.onl/linkupapi-banner" target="_blank">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="https://github.com/user-attachments/assets/df9f3784-4db3-4a30-a908-ca9aae32f54c">
     <img src="https://github.com/user-attachments/assets/e3a019f0-0dbe-4b91-8e41-684d5ea69893" alt="LinkupAPI, the outreach API for your AI agents" width="100%">
   </picture>
 </a>
 
-> Running LinkedIn agents in production? [**LinkupAPI**](https://linkupapi.com/?utm_source=stickerdaniel) is the hosted outreach API built for scale, across LinkedIn Classic, Sales Navigator, and Recruiter, plus email, WhatsApp, and iMessage.
+> Running LinkedIn agents in production? [**LinkupAPI**](https://golink.onl/linkupapi-link) is the hosted outreach API built for scale, across LinkedIn Classic, Sales Navigator, and Recruiter, plus email, WhatsApp, and iMessage.
 
-[Try LinkupAPI free →](https://linkupapi.com/?utm_source=stickerdaniel)
+[Try LinkupAPI free →](https://golink.onl/linkupapi-free)
 
 <br/>
 
-<a href="https://cadenza.page/?utm_source=github&amp;utm_medium=readme&amp;utm_campaign=oss_sponsor&amp;utm_content=banner" target="_blank">
+<a href="https://golink.onl/cadenza-banner" target="_blank">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="https://github.com/user-attachments/assets/e7dc04a7-4b2c-4f8f-bffa-77895f02a9b4">
     <img src="https://github.com/user-attachments/assets/8b8ffaf4-ac80-4943-bb14-88562d636a35" alt="Cadenza, hosted LinkedIn MCP for your AI assistant" width="100%">
   </picture>
 </a>
 
-> [**Cadenza**](https://cadenza.page/?utm_source=github&utm_medium=readme&utm_campaign=oss_sponsor&utm_content=name) is the single hosted MCP server for all your LinkedIn needs. It covers Classic, Sales Navigator, and Recruiter with 100+ actions, each within limits you set. Works on web, desktop, and mobile.
+> [**Cadenza**](https://golink.onl/cadenza-link) is the single hosted MCP server for all your LinkedIn needs. It covers Classic, Sales Navigator, and Recruiter with 100+ actions, each within limits you set. Works on web, desktop, and mobile.
 
-Use code <strong>FOUNDING20</strong> for 20% off your first year. <a href="https://cadenza.page/?utm_source=github&amp;utm_medium=readme&amp;utm_campaign=oss_sponsor&amp;utm_content=cta">Try Cadenza →</a>
+Use code <strong>FOUNDING20</strong> for 20% off your first year. <a href="https://golink.onl/cadenza-cta">Try Cadenza →</a>
 
 <br/>
 
@@ -56,16 +56,16 @@ Use code <strong>FOUNDING20</strong> for 20% off your first year. <a href="https
 
 <br/>
 
-<a href="https://zernio.link/daniel-sticker" target="_blank">
+<a href="https://zernio.link/sticker-daniel-banner" target="_blank">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="https://github.com/user-attachments/assets/f8b34875-c2b7-4466-b430-51fda4875720">
     <img src="https://github.com/user-attachments/assets/ef30cb05-80a7-4b03-a9d4-186c6db2fe43" alt="Zernio, official APIs for every social channel" width="100%">
   </picture>
 </a>
 
-> [**Zernio**](https://zernio.link/daniel-sticker) gives your agents official APIs for every social channel. Post, reply, and run ads on Instagram, TikTok, X, YouTube, Threads, and more, through one API or MCP server.
+> [**Zernio**](https://zernio.link/sticker-daniel-link) gives your agents official APIs for every social channel. Post, reply, and run ads on Instagram, TikTok, X, YouTube, Threads, and more, through one API or MCP server.
 
-[Try Zernio free →](https://zernio.link/daniel-sticker)
+[Try Zernio free →](https://zernio.link/sticker-daniel-free)
 </details>
 
 ---
@@ -100,7 +100,7 @@ Use code <strong>FOUNDING20</strong> for 20% off your first year. <a href="https
 | `search_jobs` | Find job postings by keyword and location, with job IDs for reading details. |
 | `get_saved_jobs` | List your saved job postings, with job IDs for looking up their details. |
 | `dismiss_job` | Dismiss a job from job search so later searches no longer show it. Irreversible. |
-| `search_people` | Find people by keyword, location, connection degree, and current company. |
+| `search_people` | Find people by keyword, location, degree, company, and mutual connections. |
 | `get_job_details` | Read a job posting's description, requirements, and company details. |
 | `get_job_apply_url` | Check whether a job uses Easy Apply or links to an employer's application. |
 | `get_easy_apply_form` | Read an Easy Apply form's fields, options and prefilled values. Never submits. |
@@ -112,6 +112,7 @@ Use code <strong>FOUNDING20</strong> for 20% off your first year. <a href="https
 | `get_scheduled_posts` | Read your scheduled-post queue through LinkedIn's English scheduling dialog. |
 | `get_session_status` | Check your saved login and browser state without opening a browser. |
 | `close_session` | Close the shared browser session without deleting your saved login. |
+| `open_login` | Docker: show the LinkedIn sign-in inside the chat, in clients that show MCP Apps. |
 
 ### Working with posts
 
@@ -194,6 +195,7 @@ AI agent? Get a quick confirmation from the user before enabling automatic updat
 
 - `--transport {stdio,streamable-http}` - Force the transport mode (default: stdio)
 - `--host HOST` / `--port PORT` / `--path PATH` - HTTP server address (defaults: 127.0.0.1, 8000, /mcp)
+- `--http-token-file PATH` - Require `Authorization: Bearer <token>` from HTTP clients, with the token read from this file (one trailing newline ignored, at least 32 characters). A file whose permission bits grant group or other access is refused (`chmod 600`). ACLs are not read, so on macOS also remove ACL entries (`chmod -N <file>`, check with `ls -le`). Windows does not check its permissions, so keep it in a folder only your account can read, or use the environment variable. Required for a `--host` other than loopback. Environment: `LINKEDIN_MCP_HTTP_TOKEN`; the file wins when both are set.
 
 **Timeouts:**
 
@@ -257,20 +259,16 @@ uvx mcp-server-linkedin@latest --log-level DEBUG
 uvx mcp-server-linkedin@latest --transport streamable-http --host 127.0.0.1 --port 8080 --path /mcp
 ```
 
+Any other `--host` needs a token: set `LINKEDIN_MCP_HTTP_TOKEN` or pass `--http-token-file` (a file only your account can read), and send `Authorization: Bearer <token>` from the client. The Docker HTTP example under [Setup with Docker](#setup-with-docker) shows both halves.
+
 Runtime server logs are emitted by FastMCP/Uvicorn.
 
-Tool calls are serialized to protect the shared LinkedIn browser session, both
-within one server process and across separate ones. If you run several MCP
-clients at once, each starts its own server process, and only one of them uses
-the browser at a time; the others wait briefly and take over as soon as it
-finishes a call. A client that waits too long gets a "browser is busy" message
-and can simply retry. Use `--log-level DEBUG` to see the wait/acquire/release
-logs.
+Several MCP clients can run at once and share one LinkedIn session. If one gets
+a "browser is busy" message, retry. The first client to sign in signs in all of
+them.
 
-This covers processes on the same machine and in the same runtime. It does not
-extend between the host and a Docker container sharing the same
-`~/.linkedin-mcp` directory, so do not run `--login` or `--logout` on the host
-while a container is running.
+Do not run `--login` or `--logout` on the host while a Docker container uses the
+same `~/.linkedin-mcp` directory.
 
 **Test with mcp inspector:**
 
@@ -489,13 +487,15 @@ Both run the latest server release. On the first tool call that needs authentica
 
 ### Authentication
 
-Log in once. The container opens a LinkedIn login browser that you drive from your own browser tab.
+Create the session directory first: `mkdir -p ~/.linkedin-mcp` (on Windows, `%USERPROFILE%\.linkedin-mcp`).
+
+**Sign in from the chat.** In Claude Desktop and other clients that show MCP Apps, the LinkedIn sign-in opens inside the chat when a tool needs it. Ctrl+V (Cmd+V on a Mac) pastes.
+
+**Or use the login viewer**, which shows the login browser in your own browser tab.
 
 macOS / Linux:
 
 ```bash
-# Create the directory first so the container can save your session into it
-mkdir -p ~/.linkedin-mcp
 docker run -it --rm \
   -v ~/.linkedin-mcp:/home/pwuser/.linkedin-mcp \
   -p 127.0.0.1:6080:6080 \
@@ -566,7 +566,7 @@ username.
 > `$env:USERPROFILE\.linkedin-mcp` before passing it to Docker.
 
 > [!NOTE]
-> Sessions expire over time. When tool calls start asking for authentication, repeat the login command above, or run `uvx mcp-server-linkedin@latest --login` on the host.
+> Sessions expire over time. When tool calls start asking for authentication, sign in from the chat again, repeat the login viewer command above, or run `uvx mcp-server-linkedin@latest --login` on the host.
 
 ### Setup Help
 
@@ -598,6 +598,7 @@ username.
 
 - `--transport {stdio,streamable-http}` - Force the transport mode (default: stdio)
 - `--host HOST` / `--port PORT` / `--path PATH` - HTTP server address (defaults: 127.0.0.1, 8000, /mcp)
+- `--http-token-file PATH` - Require `Authorization: Bearer <token>` from HTTP clients, with the token read from this file (one trailing newline ignored, at least 32 characters). A file whose permission bits grant group or other access is refused (`chmod 600`). ACLs are not read, so on macOS also remove ACL entries (`chmod -N <file>`, check with `ls -le`). Windows does not check its permissions, so keep it in a folder only your account can read, or use the environment variable. Required for a `--host` other than loopback. Environment: `LINKEDIN_MCP_HTTP_TOKEN`; the file wins when both are set.
 
 **Timeouts:**
 
@@ -631,11 +632,17 @@ username.
 
 **HTTP Mode Example (for web-based MCP clients):**
 
+A server bound beyond loopback requires a bearer token, and `--host 0.0.0.0`
+inside the container is beyond loopback. Generate a token, hand it to the
+container, and send it from the client.
+
 Bash / macOS / Linux:
 
 ```bash
+export LINKEDIN_MCP_HTTP_TOKEN="$(openssl rand -hex 32)"
 docker run -it --rm \
   -v ~/.linkedin-mcp:/home/pwuser/.linkedin-mcp \
+  -e LINKEDIN_MCP_HTTP_TOKEN \
   -p 127.0.0.1:8080:8080 \
   stickerdaniel/linkedin-mcp-server:latest \
   --transport streamable-http --host 0.0.0.0 --port 8080 --path /mcp
@@ -644,21 +651,49 @@ docker run -it --rm \
 PowerShell (Windows):
 
 ```powershell
+$env:LINKEDIN_MCP_HTTP_TOKEN = [guid]::NewGuid().ToString("N") + [guid]::NewGuid().ToString("N")
 $sessionDir = Join-Path $env:USERPROFILE ".linkedin-mcp"
 docker run -it --rm `
   -v "${sessionDir}:/home/pwuser/.linkedin-mcp" `
+  -e LINKEDIN_MCP_HTTP_TOKEN `
   -p 127.0.0.1:8080:8080 `
   stickerdaniel/linkedin-mcp-server:latest `
   --transport streamable-http --host 0.0.0.0 --port 8080 --path /mcp
 ```
 
-Both halves of that are needed, and they do different jobs. `--host 0.0.0.0`
-makes the server reachable *inside* the container: a process bound to
-`127.0.0.1` in there cannot be reached through a published port at all. The
-`127.0.0.1:` in front of `-p` is what limits it *outside*, to this machine.
-Drop that prefix and Docker publishes on every interface, which puts an
-endpoint with no authentication on your network. The server cannot tell the two
-apart, so it warns either way.
+`-e LINKEDIN_MCP_HTTP_TOKEN` without a value copies the variable from your
+shell, so the token stays out of the `docker run` command line. Use the
+variable rather than `--http-token-file` in Docker: a read-only secrets mount
+often reports mode `0444`, which the file check refuses. The client sends the
+token as a header on every request:
+
+```json
+{
+  "mcpServers": {
+    "mcp-server-linkedin": {
+      "url": "http://127.0.0.1:8080/mcp",
+      "headers": { "Authorization": "Bearer <your token>" }
+    }
+  }
+}
+```
+
+The token is a static header, not an OAuth login, so a client has to support
+custom headers. A request without it, or with a different one, gets `401`. The
+token needs at least 32 characters.
+
+`--host 0.0.0.0` and the `127.0.0.1:` prefix on `-p` do different jobs, and
+both are needed. `--host 0.0.0.0` makes the server reachable *inside* the
+container: a process bound to `127.0.0.1` in there cannot be reached through a
+published port at all. The `127.0.0.1:` in front of `-p` limits it *outside*,
+to this machine. Plain HTTP sends the token unencrypted, so reach the server
+from another machine through an SSH tunnel or an HTTPS reverse proxy, never by
+publishing the port on your network.
+
+Without a token, a bind beyond loopback refuses to start.
+`LINKEDIN_MCP_ALLOW_UNAUTHENTICATED_HTTP=true` starts it anyway, with a
+warning. That is unsafe: anyone who can reach the port can use your LinkedIn
+session. Use it only when something else restricts the port.
 
 Loopback publishing limits this to the machine, not to the container. Other
 containers on the same host can still reach it through `host.docker.internal`
@@ -681,9 +716,9 @@ serve it under:
 FASTMCP_HTTP_ALLOWED_HOSTS='["mcp.example"]'
 ```
 
-That permits exactly that name and keeps refusing everything else. The endpoint
-still has no authentication, so anything reachable beyond your own machine
-belongs behind something that provides it.
+That permits exactly that name and keeps refusing everything else. Requests
+under that name still need the bearer token, and the proxy in front should
+terminate HTTPS so the token never crosses the network in plain text.
 
 **Test with mcp inspector:**
 
@@ -751,6 +786,19 @@ belongs behind something that provides it.
 </details>
 
 </details>
+
+## Sign in outside the chat
+
+Run the login viewer, open the link it prints and sign in:
+
+```bash
+docker run -it --rm \
+  -v ~/.linkedin-mcp:/home/pwuser/.linkedin-mcp \
+  -p 127.0.0.1:6080:6080 \
+  stickerdaniel/linkedin-mcp-server:latest --login --login-viewer
+```
+
+Without Docker: `uvx mcp-server-linkedin@latest --login`.
 
 <br/>
 <br/>
@@ -838,6 +886,7 @@ uv run -m linkedin_mcp_server
 
 - `--transport {stdio,streamable-http}` - Force the transport mode (default: stdio)
 - `--host HOST` / `--port PORT` / `--path PATH` - HTTP server address (defaults: 127.0.0.1, 8000, /mcp)
+- `--http-token-file PATH` - Require `Authorization: Bearer <token>` from HTTP clients, with the token read from this file (one trailing newline ignored, at least 32 characters). A file whose permission bits grant group or other access is refused (`chmod 600`). ACLs are not read, so on macOS also remove ACL entries (`chmod -N <file>`, check with `ls -le`). Windows does not check its permissions, so keep it in a folder only your account can read, or use the environment variable. Required for a `--host` other than loopback. Environment: `LINKEDIN_MCP_HTTP_TOKEN`; the file wins when both are set.
 
 **Timeouts:**
 
@@ -878,6 +927,8 @@ uv run -m linkedin_mcp_server
 ```bash
 uv run -m linkedin_mcp_server --transport streamable-http --host 127.0.0.1 --port 8000 --path /mcp
 ```
+
+Any other `--host` needs a token: set `LINKEDIN_MCP_HTTP_TOKEN` or pass `--http-token-file` (a file only your account can read), and send `Authorization: Bearer <token>` from the client.
 
 **Claude Desktop:**
 

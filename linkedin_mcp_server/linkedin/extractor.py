@@ -88,9 +88,11 @@ class LinkedInExtractor:
             text, scope=scope, timeout=timeout
         )
 
-    async def extract_feed(self, num_posts: int = 10) -> ExtractedSection:
+    async def extract_feed(
+        self, num_posts: int = 10, max_scrolls: int | None = None
+    ) -> ExtractedSection:
         """Read the LinkedIn home feed, scrolling until enough posts load."""
-        return await self._feed.extract_feed(num_posts)
+        return await self._feed.extract_feed(num_posts, max_scrolls)
 
     async def extract_page(
         self,
@@ -184,6 +186,7 @@ class LinkedInExtractor:
         easy_apply: bool = False,
         sort_by: str | None = None,
         tool_timeout: float = DEFAULT_TOOL_TIMEOUT_SECONDS,
+        start: int = 0,
     ) -> dict[str, Any]:
         """Search for jobs with pagination and job ID extraction."""
         return await self._jobs.search_jobs(
@@ -197,6 +200,7 @@ class LinkedInExtractor:
             easy_apply,
             sort_by,
             tool_timeout,
+            start,
         )
 
     async def get_saved_jobs(
@@ -215,6 +219,7 @@ class LinkedInExtractor:
         location: str | None = None,
         network: list[str] | None = None,
         current_company: str | None = None,
+        connection_of: str | None = None,
     ) -> dict[str, Any]:
         """Search for people and extract the results page."""
         return await self._person.search_people(
@@ -222,6 +227,7 @@ class LinkedInExtractor:
             location=location,
             network=network,
             current_company=current_company,
+            connection_of=connection_of,
         )
 
     async def search_companies(self, keywords: str) -> dict[str, Any]:

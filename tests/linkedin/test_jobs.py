@@ -790,6 +790,138 @@ class TestSearchJobs:
             "reason": "max_pages",
         }
 
+    async def test_a_search_resumes_from_the_offset_it_is_given(self, mock_page):
+        """`start` takes over where `pagination.next_offset` left off.
+
+        Both pages are asked for by address, the first included: a first
+        page built without the offset serves results the previous call has
+        already returned.
+        """
+        reader = _reader(mock_page)
+        id_pages = iter([["600", "700"], ["800"]])
+        urls_visited: list[str] = []
+
+        navigate_page = self._navigating(
+            mock_page, [extracted("Page 3 text"), extracted("Page 4 text")]
+        )
+
+        async def mock_extract(url, *args, **kwargs):
+            urls_visited.append(url)
+            return await navigate_page(url)
+
+        with (
+            patch.object(
+                reader._pages, "_extract_search_page", side_effect=mock_extract
+            ),
+            patch.object(
+                reader._pages,
+                "_extract_job_ids",
+                new_callable=AsyncMock,
+                side_effect=lambda **kw: next(id_pages),
+            ),
+            patch.object(
+                reader._pages,
+                "_get_total_search_pages",
+                new_callable=AsyncMock,
+                return_value=None,
+            ),
+            patch(
+                "linkedin_mcp_server.linkedin.jobs.asyncio.sleep",
+                new_callable=AsyncMock,
+            ),
+        ):
+            result = await reader.search_jobs("python", max_pages=2, start=50)
+
+        starts = [parse_qs(urlparse(url).query)["start"] for url in urls_visited]
+        assert starts == [["50"], ["52"]]
+        assert result["url"] == urls_visited[0]
+        assert result["job_ids"] == ["600", "700", "800"]
+        assert result["pagination"] == {
+            "pages_fetched": 2,
+            "next_offset": 53,
+            "reason": "max_pages",
+        }
+
+    async def test_a_resumed_search_that_lost_its_offset_stops(self, mock_page):
+        """A first page served without `start` repeats the previous call.
+
+        Its ids are real results of the same search, so nothing else would
+        tell the caller they were already returned.
+        """
+        reader = _reader(mock_page)
+        with (
+            patch.object(
+                reader._pages,
+                "_extract_search_page",
+                side_effect=self._navigating(
+                    mock_page,
+                    [extracted("Page 1 text")],
+                    lands_on="https://www.linkedin.com/jobs/search/?keywords=python",
+                ),
+            ),
+            patch.object(
+                reader._pages,
+                "_extract_job_ids",
+                new_callable=AsyncMock,
+                return_value=["100", "200"],
+            ) as mock_ids,
+            patch.object(
+                reader._pages,
+                "_get_total_search_pages",
+                new_callable=AsyncMock,
+                return_value=None,
+            ),
+        ):
+            result = await reader.search_jobs("python", max_pages=1, start=25)
+
+        assert result["job_ids"] == []
+        assert (
+            result["section_errors"]["search_results"]["error_type"]
+            == "pagination_stopped"
+        )
+        mock_ids.assert_not_awaited()
+        assert "pagination" not in result
+
+    async def test_a_resumed_search_past_its_last_result_is_complete(self, mock_page):
+        """Recommendations after a resume end the list; they are not a no-match.
+
+        The offset came from a call that did find results, so reporting that
+        nothing matches the keywords would contradict it.
+        """
+        reader = _reader(mock_page)
+        recommendations = extracted(
+            "Jobs you may be interested in\nMLOps Engineer (H/F/X)"
+        )
+        with (
+            patch.object(
+                reader._pages,
+                "_extract_search_page",
+                side_effect=self._navigating(mock_page, [recommendations]),
+            ),
+            patch.object(
+                reader._pages,
+                "_extract_job_ids",
+                new_callable=AsyncMock,
+                return_value=["4458422026"],
+            ) as mock_ids,
+            patch.object(
+                reader._pages,
+                "_get_total_search_pages",
+                new_callable=AsyncMock,
+                return_value=None,
+            ),
+        ):
+            result = await reader.search_jobs("python", max_pages=3, start=40)
+
+        assert result["job_ids"] == []
+        assert "section_errors" not in result
+        mock_ids.assert_not_awaited()
+        assert result["pagination"] == {
+            "pages_fetched": 1,
+            "next_offset": 40,
+            "reason": "complete",
+        }
+
     async def test_references_keep_all_jobs_beyond_the_per_section_cap(self, mock_page):
         reader = _reader(mock_page)
         id_pages = [
@@ -963,7 +1095,7 @@ class TestSearchJobs:
         [
             (None, False),
             (
-                "https://www.linkedin.com/jobs/search/?keywords=python&f_EA=true",
+                "https://www.linkedin.com/jobs/search/?keywords=python&f_AL=true",
                 True,
             ),
         ],
@@ -1002,21 +1134,21 @@ class TestSearchJobs:
         ):
             result = await reader.search_jobs(
                 "python",
-                job_type="x&f_EA=true",
+                job_type="x&f_AL=true",
                 easy_apply=True,
                 max_pages=1,
             )
 
         assert result["url"] == (
             "https://www.linkedin.com/jobs/search/"
-            "?keywords=python&f_JT=x%26f_EA%3Dtrue&f_EA=true"
+            "?keywords=python&f_JT=x%26f_AL%3Dtrue&f_AL=true"
         )
         assert result["job_ids"] == ["901"]
         if expected_dropped:
             error = result["section_errors"]["search_results"]
             assert error["error_type"] == "filters_dropped"
             assert "f_JT" in error["error_message"]
-            assert "did not keep f_EA" not in error["error_message"]
+            assert "did not keep f_AL" not in error["error_message"]
         else:
             assert "section_errors" not in result
 
@@ -1834,7 +1966,8 @@ class TestSearchJobs:
         assert "location=Remote" in result["url"]
         assert "f_TPR=r604800" in result["url"]
         assert "f_WT=2" in result["url"]
-        assert "f_EA=true" in result["url"]
+        assert "f_AL=true" in result["url"]
+        assert "f_EA" not in result["url"]
         assert mock_extract.await_count == 1
 
     async def test_page_texts_joined_with_separator(self, mock_page):

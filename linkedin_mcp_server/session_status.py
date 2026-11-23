@@ -41,5 +41,5 @@ def session_status() -> dict[str, Any]:
             **browser_activity(),
             "idle_timeout_seconds": get_config().browser.browser_idle_timeout_seconds,
         },
-        **bootstrap_observation(),
+        **bootstrap_observation(stored=stored),
     }

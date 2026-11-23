@@ -26,6 +26,7 @@ from linkedin_mcp_server.bootstrap import (
     report_retained_browser_revisions_if_ready,
     start_background_browser_setup_if_needed,
     stop_background_browser_setup,
+    stop_login,
 )
 from linkedin_mcp_server.config.schema import DEFAULT_TOOL_TIMEOUT_SECONDS
 from linkedin_mcp_server.drivers.browser import (
@@ -34,6 +35,7 @@ from linkedin_mcp_server.drivers.browser import (
 )
 from linkedin_mcp_server.daemon.auth_repair import OwnerAuthSignalMiddleware
 from linkedin_mcp_server.error_handler import ErrorCodeMiddleware, raise_tool_error
+from linkedin_mcp_server.login_app import login_app_offered, register_login_app
 from linkedin_mcp_server.sequential_tool_middleware import (
     SequentialToolExecutionMiddleware,
 )
@@ -44,6 +46,7 @@ from linkedin_mcp_server.server_role import (
 )
 from linkedin_mcp_server.session_status import session_status
 from linkedin_mcp_server.update_check import UpdateNoticeMiddleware
+from linkedin_mcp_server.write_confirmation import WriteConfirmationMiddleware
 from linkedin_mcp_server.tools.company import register_company_tools
 from linkedin_mcp_server.tools.feed import register_feed_tools
 from linkedin_mcp_server.tools.job import register_job_tools
@@ -78,17 +81,22 @@ complete it in the browser, then continue when they say so.
 
 
 class _StaticTokenAuth(TokenVerifier):
-    """Accepts exactly the one token the owner published, and nothing else.
+    """Accepts exactly one token, and nothing else.
 
-    A whole OAuth flow would be ceremony here: both ends are this installation,
-    the token is minted at startup, never reused, and written to a file only
-    this account can read. What it has to be is unguessable and compared without
-    leaking where two tokens diverge, which is what the digest comparison below
-    is for.
+    Two credentials use it and stay apart: the token a daemon owner published
+    for its frontends, and the one an operator configured for HTTP clients.
+    *client_id* names which of the two a request presented.
+
+    A whole OAuth flow would be ceremony here. The owner's token is minted at
+    startup, never reused, and written to a file only this account can read;
+    the operator's is handed to the client by hand. What each has to be is
+    unguessable and compared without leaking where two tokens diverge, which is
+    what the digest comparison below is for.
     """
 
-    def __init__(self, token: str) -> None:
+    def __init__(self, token: str, *, client_id: str = "linkedin-mcp-frontend") -> None:
         super().__init__()
+        self._client_id = client_id
         # A digest rather than the token, so the verifier's own repr does not
         # carry the credential — the surrounding code logs whole objects at
         # DEBUG and users paste those logs into issue reports.
@@ -105,7 +113,7 @@ class _StaticTokenAuth(TokenVerifier):
             self._expected, hashlib.sha256(token.encode()).digest()
         ):
             return None
-        return AccessToken(token=token, client_id="linkedin-mcp-frontend", scopes=[])
+        return AccessToken(token=token, client_id=self._client_id, scopes=[])
 
 
 @lifespan
@@ -158,14 +166,22 @@ async def browser_lifespan(app: FastMCP) -> AsyncIterator[dict[str, Any]]:
                     # prevent, and it matters more than the reason the poll failed.
                     logger.warning("Profile handoff watcher failed", exc_info=True)
         finally:
-            # Setup is owned by this lifespan. This also covers cancellation while
-            # direct-server startup is still waiting on its shared readiness task.
+            # The login ends with the server and finishes its own cleanup first:
+            # it may have retired the previous session and has to restore it
+            # while it still holds the profile. Before setup, which it may be
+            # waiting on.
             try:
-                await stop_background_browser_setup()
+                await stop_login()
             finally:
-                # A BaseException from either background task still closes the
-                # browser; it is no reason to abandon the shared profile.
-                await close_browser()
+                # Setup is owned by this lifespan. This also covers cancellation
+                # while direct-server startup is still waiting on its shared
+                # readiness task.
+                try:
+                    await stop_background_browser_setup()
+                finally:
+                    # A BaseException from either background task still closes
+                    # the browser; it is no reason to abandon the shared profile.
+                    await close_browser()
 
 
 def create_mcp_server(
@@ -173,6 +189,7 @@ def create_mcp_server(
     tool_timeout: float = DEFAULT_TOOL_TIMEOUT_SECONDS,
     role: ServerRole = ServerRole.DIRECT,
     auth_token: str | None = None,
+    http_token: str | None = None,
     proxy_backend: "DaemonProxyBackend | None" = None,
     silent_owner: "Unanswered | None" = None,
 ) -> FastMCP:
@@ -185,6 +202,11 @@ def create_mcp_server(
     *auth_token* is the bearer token a daemon owner requires. Only an owner has
     one: it listens on a loopback port that every process on the machine can
     reach, and a browser the user merely points at a page can reach it too.
+
+    *http_token* is the bearer token a Direct server's HTTP clients present,
+    configured by the operator. It is a separate credential from *auth_token*,
+    and only a Direct server takes it: that is the only role with an HTTP
+    listener a user's client connects to.
 
     *proxy_backend* is the owner a proxy forwards to, held as an object rather
     than as a bare attachment because which owner that is can change: an upgrade
@@ -202,7 +224,14 @@ def create_mcp_server(
         # owner. Refused rather than ignored, because the mistake it describes
         # is an endpoint that was meant to be authenticated.
         raise ValueError(
-            f"Only a daemon owner authenticates requests, not {role.value}"
+            f"Only a daemon owner requires the frontend token, not {role.value}"
+        )
+    if http_token is not None and role is not ServerRole.DIRECT:
+        # The owner's port is guarded by its own minted token, and a proxy
+        # serves stdio. Accepting the operator's token on either would let it
+        # stand in for the owner's credential or protect nothing.
+        raise ValueError(
+            f"Only a Direct server authenticates HTTP clients, not {role.value}"
         )
     if role is ServerRole.PROXY and proxy_backend is None:
         # A proxy registers no tools of its own, so without an owner it would
@@ -233,6 +262,13 @@ def create_mcp_server(
     # rule, including the owner's, which claims OWNER before it ever gets here.
     set_process_role(role)
 
+    # At most one of the two, by the role checks above.
+    auth: _StaticTokenAuth | None = None
+    if auth_token is not None:
+        auth = _StaticTokenAuth(auth_token)
+    elif http_token is not None:
+        auth = _StaticTokenAuth(http_token, client_id="linkedin-mcp-http-client")
+
     mcp = FastMCP(
         "mcp-server-linkedin",
         version=__version__,
@@ -245,11 +281,15 @@ def create_mcp_server(
         # and then claim to be closing a browser it never had.
         lifespan=browser_lifespan if role.drives_browser else None,
         mask_error_details=True,
-        auth=_StaticTokenAuth(auth_token) if auth_token is not None else None,
+        auth=auth,
     )
     # First, so it is the outermost layer on every role: everything inside it
     # still sees a failure as the exception it raised.
     mcp.add_middleware(ErrorCodeMiddleware())
+    # Second, so a proxy asks before it forwards and a direct server asks before
+    # it takes the browser lock, and the user's answer counts against no timeout.
+    if role.faces_a_client:
+        mcp.add_middleware(WriteConfirmationMiddleware())
     # Added before the serializing middleware below, which makes it the outer one.
     # An inner position would work: `close_browser` does not consult the in-flight
     # count, so quiescence succeeds from there, and the lease reference the inner
@@ -302,7 +342,10 @@ def create_mcp_server(
         mcp.add_middleware(UpdateNoticeMiddleware())
 
     if proxy_backend is not None:
-        from linkedin_mcp_server.daemon.forwarder import OwnerForwarder
+        from linkedin_mcp_server.daemon.forwarder import (
+            OwnerForwarder,
+            ResourcesAnsweredHere,
+        )
         from linkedin_mcp_server.daemon.proxy import call_budget
 
         # Each request on the hop gets the call's whole budget, so the owner,
@@ -316,6 +359,7 @@ def create_mcp_server(
         # 3.4.4 — `tools/list` returned `[]` and the call that followed failed as
         # an unknown tool. A transport failure has to look like one.
         mcp.provider_error_strategy = "raise"
+        mcp.add_middleware(ResourcesAnsweredHere())
 
     # Every local registration below drives Chromium, so a proxy takes none of
     # them and serves the owner's through the provider above instead.
@@ -368,5 +412,13 @@ def create_mcp_server(
                 return session_status()
             except Exception as e:
                 raise_tool_error(e, "get_session_status")  # NoReturn
+
+    # The Docker image's Direct server only, the check `docker_auth_remedy` makes
+    # too, so no error names an unregistered `open_login`. An owner has no client
+    # of its own to show a view to, and resources are not forwarded, so a proxy
+    # could offer the tools but never the page they belong to. Docker always runs
+    # Direct.
+    if login_app_offered():
+        register_login_app(mcp, tool_timeout=tool_timeout)
 
     return mcp

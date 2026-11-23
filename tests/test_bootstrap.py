@@ -7917,6 +7917,52 @@ class TestInstallerLinesAgainstARealPipe:
         assert pieces == ["   indented"]
 
 
+class TestInstallerLinesAcrossAStagedRead:
+    """A forced fragment goes out while the rest of its line has not arrived."""
+
+    async def _staged(self, first: bytes, rest: bytes) -> list[str]:
+        from linkedin_mcp_server.bootstrap import _installer_lines
+
+        reader = asyncio.StreamReader(limit=2**22)
+        lines = _installer_lines(reader)
+        reader.feed_data(first)
+        emitted = [await anext(lines)]
+        reader.feed_data(rest)
+        reader.feed_eof()
+        return emitted + [line async for line in lines]
+
+    @pytest.mark.parametrize(
+        "before_the_cut", ["h", "ht", "htt", "http", "https", "https:", "https:/"]
+    )
+    async def test_a_glued_url_arriving_across_a_forced_cut_keeps_its_secret(
+        self, before_the_cut
+    ):
+        from linkedin_mcp_server.bootstrap import _MAX_LINE_CHARS
+
+        url = "https://cdn.example/s3cr3tZQX/x.zip"
+        arrived = len(before_the_cut) + 1
+        padding = "x" * (_MAX_LINE_CHARS - len(before_the_cut))
+
+        emitted = await self._staged(
+            (padding + url[:arrived]).encode(), (url[arrived:] + "\n").encode()
+        )
+
+        assert "s3cr3tZQX" not in "".join(emitted)
+        assert "".join(emitted).startswith(padding)
+
+    async def test_scheme_relative_userinfo_across_a_forced_cut_keeps_its_secret(self):
+        from linkedin_mcp_server.bootstrap import _MAX_LINE_CHARS
+
+        padding = "x" * (_MAX_LINE_CHARS - 1)
+
+        emitted = await self._staged(
+            (padding + "//").encode(), b"user:s3cr3tZQX@host.example/p\n"
+        )
+
+        assert "s3cr3tZQX" not in "".join(emitted)
+        assert "".join(emitted).startswith(padding)
+
+
 class TestInstallCallbackThreading:
     """Only the CLI path prints; the background path stays silent."""
 
@@ -8472,7 +8518,7 @@ class TestPatchrightCommandTargetContract:
     def test_the_locked_release_is_the_one_this_contract_describes(self):
         import importlib.metadata
 
-        assert importlib.metadata.version("patchright") == "1.63.0"
+        assert importlib.metadata.version("patchright") == "1.64.4"
 
     def _assert_is_an_ffmpeg_directory(self, name: str) -> None:
         """Pin the kind, and the revision to one this browsers.json names.
@@ -9984,10 +10030,6 @@ class TestAnOwnerNeverSignsInItself:
 
         config = _auto_import_config(flag=False, is_interactive=True)
         monkeypatch.setattr("linkedin_mcp_server.bootstrap.get_config", lambda: config)
-        monkeypatch.setattr(
-            "linkedin_mcp_server.bootstrap._move_invalid_auth_state_aside",
-            MagicMock(),
-        )
         login_flow = AsyncMock()
         monkeypatch.setattr("linkedin_mcp_server.bootstrap._run_login_flow", login_flow)
 

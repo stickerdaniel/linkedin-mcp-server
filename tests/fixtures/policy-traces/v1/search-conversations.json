@@ -86,6 +86,15 @@
       "timeout_ms": 10000
     },
     {
+      "call": "search_conversations",
+      "kind": "wait_for_selector",
+      "operation": "conversation_rows",
+      "section": "conversation",
+      "selector": "main li label[aria-label]",
+      "state": "attached",
+      "timeout_ms": 10000
+    },
+    {
       "arg": {
         "selectors": [
           "main"
@@ -99,12 +108,10 @@
     },
     {
       "call": "search_conversations",
-      "kind": "wait_for_selector",
-      "operation": "conversation_rows",
-      "section": "conversation",
-      "selector": "main li label[aria-label]",
-      "state": "attached",
-      "timeout_ms": 10000
+      "kind": "evaluate",
+      "operation": "page_time_zone",
+      "program_digest": "5d4ce137d9de",
+      "section": "conversation"
     }
   ],
   "result": {
@@ -113,6 +120,10 @@
     ],
     "sections": {
       "search_results": "Conversation content"
+    },
+    "time_zone": {
+      "id": "Europe/Berlin",
+      "utc_offset": "+01:00"
     },
     "url": "https://www.linkedin.com/messaging/?searchTerm=engine"
   },

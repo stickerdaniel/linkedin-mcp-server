@@ -15,6 +15,7 @@ from linkedin_mcp_server.core.exceptions import (
 )
 from linkedin_mcp_server.linkedin.identifiers import (
     company_page_url,
+    job_id_from_path,
     job_view_url,
     messaging_thread_url,
     normalize_company_identifier,
@@ -26,6 +27,7 @@ from linkedin_mcp_server.linkedin.identifiers import (
     normalize_thread_id,
     person_profile_url,
 )
+from linkedin_mcp_server.linkedin.link_metadata import classify_link
 
 PROFILE_ID = "ACoAADdZSNYBiaacxEw6je-wVIKjGkKp-it0gD8"
 
@@ -316,6 +318,33 @@ class TestNormalizeCompanyIdentifier:
     @pytest.mark.parametrize(
         "value",
         [
+            "johnson-&-johnson",
+            "https://www.linkedin.com/company/johnson-&-johnson/",
+            "https://www.linkedin.com/company/johnson-%26-johnson/jobs/",
+        ],
+    )
+    def test_keeps_the_ampersand_of_a_company_slug(self, value: str):
+        # LinkedIn writes some slugs with a literal "&", Johnson & Johnson's
+        # among them, and search_companies hands that path back as a reference.
+        assert normalize_company_identifier(value) == "johnson-&-johnson"
+
+    @pytest.mark.parametrize(
+        "value",
+        [
+            "lowe's-home-improvement",
+            "/company/lowe's-home-improvement/",
+            "https://www.linkedin.com/company/lowe's-home-improvement/",
+            "https://www.linkedin.com/company/lowe%27s-home-improvement/life/",
+        ],
+    )
+    def test_keeps_the_apostrophe_of_a_company_slug(self, value: str):
+        # Lowe's links its page as /company/lowe's-home-improvement/, and
+        # classify_link hands that path back as a company reference.
+        assert normalize_company_identifier(value) == "lowe's-home-improvement"
+
+    @pytest.mark.parametrize(
+        "value",
+        [
             "https://www.linkedin.com/school/rwth-aachen-university/",
             "https://www.linkedin.com/showcase/microsoft",
         ],
@@ -402,6 +431,18 @@ class TestUrlBuilders:
             == "https://www.linkedin.com/company/microsoft/people/"
         )
 
+    def test_writes_an_ampersand_slug_the_way_linkedin_links_it(self):
+        assert (
+            company_page_url("johnson-&-johnson", "/")
+            == "https://www.linkedin.com/company/johnson-&-johnson/"
+        )
+
+    def test_writes_an_apostrophe_slug_the_way_linkedin_links_it(self):
+        assert (
+            company_page_url("lowe's-home-improvement", "/")
+            == "https://www.linkedin.com/company/lowe's-home-improvement/"
+        )
+
 
 class TestReferencesThisServerEmits:
     """link_metadata renders every reference as a site-relative path, and the
@@ -426,6 +467,14 @@ class TestReferencesThisServerEmits:
     )
     def test_company_reference_yields_the_slug(self, reference, expected):
         assert normalize_company_identifier(reference) == expected
+
+    def test_an_ampersand_company_link_survives_the_round_trip(self):
+        link = "https://www.linkedin.com/company/johnson-&-johnson/"
+        assert classify_link(link) == ("company", "/company/johnson-&-johnson/")
+        assert (
+            normalize_company_identifier("/company/johnson-&-johnson/")
+            == "johnson-&-johnson"
+        )
 
     def test_thread_reference_yields_the_id(self):
         assert normalize_thread_id("/messaging/thread/2-abc123/") == "2-abc123"
@@ -636,7 +685,6 @@ class TestJobOpenInASearch:
         [
             "https://www.linkedin.com/jobs/search/?keywords=python",
             "https://www.linkedin.com/jobs/search/?currentJobId=abc",
-            "https://www.linkedin.com/jobs/search/?currentJobId=1&currentJobId=2",
             "https://www.linkedin.com/feed/?currentJobId=4252026496",
             # The query value must be the digits themselves, not a reference
             # that decodes or trims into some other job.
@@ -648,6 +696,117 @@ class TestJobOpenInASearch:
     def test_a_search_without_one_job_is_still_refused(self, value: str):
         with pytest.raises(InvalidReferenceError):
             normalize_job_id(value)
+
+
+def _job_input(url: str) -> str | None:
+    try:
+        return normalize_job_id(url)
+    except InvalidReferenceError:
+        return None
+
+
+def _job_reference(url: str) -> str | None:
+    match classify_link(url):
+        case ("job", reference):
+            return reference
+        case _:
+            return None
+
+
+class TestOneJobGrammar:
+    """A job link means the same job, or none, whether a caller passes it in or
+    a page shows it. Each side read job routes with its own rules, and every
+    difference was a reference one side printed and the other refused, or a
+    search the input called ambiguous while the page reading picked a job."""
+
+    @pytest.mark.parametrize(
+        ("url", "job_id", "reference"),
+        [
+            ("/jobs/view/4252026496/", "4252026496", "/jobs/view/4252026496/"),
+            # Two values do not say which job was meant, even when they agree,
+            # and an escaped key is still the same parameter.
+            ("/jobs/search/?currentJobId=1&currentJobId=2", None, None),
+            ("/jobs/search/?currentJobId=1&currentJobId=1", None, None),
+            ("/jobs/search/?currentJobId=1&current%4AobId=2", None, None),
+            ("/jobs/search-results/?currentJobId=7&currentJobId=8", None, None),
+            # A blank or valueless occurrence selects nothing.
+            ("/jobs/search/?currentJobId=&currentJobId=1", "1", "/jobs/view/1/"),
+            ("/jobs/search/?currentJobId=1&currentJobId=", "1", "/jobs/view/1/"),
+            ("/jobs/search/?currentJobId&currentJobId=1", "1", "/jobs/view/1/"),
+            ("/jobs/search/?currentJobId=1&currentJobId", "1", "/jobs/view/1/"),
+            ("/jobs/search/?currentJobId=&currentJobId=", None, None),
+            # The escape decodes to a path separator inside the job segment.
+            ("/jobs/view/ui%2Fux-designer-at-acme-4252026496/", None, None),
+            # A title keeps its punctuation in front of the id.
+            (
+                "/jobs/view/senior-.net-developer-at-acme-4252026496/",
+                "4252026496",
+                "/jobs/view/4252026496/",
+            ),
+            (
+                "/jobs/view/node.js-engineer-at-acme-4252026496/",
+                "4252026496",
+                "/jobs/view/4252026496/",
+            ),
+            (
+                "/jobs/view/c%2B%2B-engineer-at-acme-4252026496/",
+                "4252026496",
+                "/jobs/view/4252026496/",
+            ),
+            ("/jobs/view/engineer-(ai)-1234/", "1234", "/jobs/view/1234/"),
+            # An escaped percent sign or space is title text, not syntax.
+            (
+                "/jobs/view/100%25-remote-developer-at-acme-4252026496/",
+                "4252026496",
+                "/jobs/view/4252026496/",
+            ),
+            (
+                "/jobs/view/senior%20developer-at-acme-4252026496/",
+                "4252026496",
+                "/jobs/view/4252026496/",
+            ),
+            # The escape decodes to a query delimiter, a backslash, or no UTF-8.
+            ("/jobs/view/what%3F-at-acme-4252026496/", None, None),
+            ("/jobs/view/a%5Cb-at-acme-4252026496/", None, None),
+            ("/jobs/view/caf%FF-at-acme-4252026496/", None, None),
+            # Arabic-Indic digits are decimal digits to Python and no job id.
+            ("/jobs/view/engineer-٤٢٥/", None, None),
+            ("/jobs/search/?currentJobId=%D9%A4%D9%A2%D9%A5", None, None),
+        ],
+    )
+    def test_both_boundaries_read_the_same_job(
+        self, url: str, job_id: str | None, reference: str | None
+    ):
+        absolute = f"https://www.linkedin.com{url}"
+        assert (_job_input(absolute), _job_reference(absolute)) == (job_id, reference)
+
+    @pytest.mark.parametrize(
+        "piece", [".", "(", "&", "%2B", "%C3%A9", "%20", "%25", "%2525"]
+    )
+    def test_every_job_reference_is_accepted_as_input(self, piece: str):
+        url = f"https://www.linkedin.com/jobs/view/engineer{piece}at-acme-4252026496/"
+        reference = _job_reference(url)
+        assert reference == "/jobs/view/4252026496/"
+        assert _job_input(reference) == _job_input(url) == "4252026496"
+
+    @pytest.mark.parametrize("piece", ["%2F", "%3F", "%23", "%5C", "%0A", "%FF", "%ZZ"])
+    def test_a_segment_that_decodes_to_syntax_names_no_job(self, piece: str):
+        url = f"https://www.linkedin.com/jobs/view/engineer{piece}at-acme-4252026496/"
+        assert (_job_input(url), _job_reference(url)) == (None, None)
+
+    @pytest.mark.parametrize(
+        ("landed", "job_id"),
+        [
+            ("/jobs/view/4252026496/", "4252026496"),
+            ("/jobs/view/d%C3%A9veloppeur-at-acme-4252026496/", "4252026496"),
+            ("/jobs/view/100%25-remote-developer-at-acme-4252026496/", "4252026496"),
+            ("/jobs/view/ui%2Fux-designer-at-acme-4252026496/", None),
+            ("/feed/", None),
+        ],
+    )
+    def test_the_landed_posting_names_its_job(self, landed: str, job_id):
+        # read_posting_title compares this with the job it navigated to.
+        assert job_id_from_path(landed) == job_id
 
 
 class TestNothingTidiesTheReference:
@@ -674,7 +833,7 @@ class TestNothingTidiesTheReference:
 
 class TestIdentifierAllowlist:
     """A public identifier is letters, digits, hyphen and underscore, and a
-    company slug also takes a period. The old rule listed forbidden syntax
+    company slug also takes a period and an ampersand. The old rule listed forbidden syntax
     instead, so a value carrying none of it passed and spent a page load on a
     404."""
 
@@ -688,6 +847,11 @@ class TestIdentifierAllowlist:
         ["foo.bar", "/in/foo.bar/", "https://www.linkedin.com/in/foo.bar"],
     )
     def test_a_person_identifier_takes_no_period(self, value: str):
+        with pytest.raises(InvalidReferenceError):
+            normalize_person_identifier(value)
+
+    @pytest.mark.parametrize("value", ["foo&bar", "/in/foo&bar/"])
+    def test_a_person_identifier_takes_no_ampersand(self, value: str):
         with pytest.raises(InvalidReferenceError):
             normalize_person_identifier(value)
 

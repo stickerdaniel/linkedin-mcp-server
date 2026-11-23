@@ -7,6 +7,7 @@ failure, and nothing deletes or moves the profile while a process is using it.
 
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 import time
@@ -61,6 +62,40 @@ def _hold_profile(auth_root: Path, seconds: float) -> subprocess.Popen[str]:
         process.kill()
         raise
     return process
+
+
+def _signs_in(opened: list[bool] | None = None, *, then=None):
+    """The browser half of a login that signs in, writing what Chromium would.
+
+    Only the browser is replaced: the attempt directory, the lease and the
+    promotion are the real ones.
+    """
+
+    async def body(pending, *, config, state, stop_when=None, login_viewer=False):
+        if opened is not None:
+            opened.append(True)
+        (pending.profile_dir / "Default").mkdir(parents=True)
+        (pending.profile_dir / "Default" / "Cookies").write_text("fresh")
+        pending.cookie_path.write_text("[]")
+        if then is not None:
+            then(pending)
+        state.close_confirmed = True
+        return True
+
+    return body
+
+
+def _write_session(profile_dir: Path) -> str:
+    """Put a usable session on disk and return its generation."""
+    from linkedin_mcp_server.session_state import (
+        portable_cookie_path,
+        write_source_state,
+    )
+
+    (profile_dir / "Default").mkdir(parents=True, exist_ok=True)
+    (profile_dir / "Default" / "Cookies").write_text("placeholder")
+    portable_cookie_path(profile_dir).write_text("[]")
+    return write_source_state(profile_dir).login_generation
 
 
 def _call_context(tool_name: str = "get_person_profile") -> MagicMock:
@@ -622,6 +657,37 @@ class TestMinimumHoldWindow:
             lease.mark_browser_closed()
             lease.release()
 
+    async def test_an_owner_at_the_end_of_the_window_hands_over(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from linkedin_mcp_server.config import get_config, reset_config
+        from linkedin_mcp_server.drivers import browser as browser_module
+
+        monkeypatch.setenv("BROWSER_MIN_HOLD", "20")
+        reset_config()
+
+        lease = MagicMock()
+        lease.handoff_requested.return_value = True
+        lease.held_seconds = get_config().browser.browser_min_hold_seconds
+        fake_browser = MagicMock()
+        fake_browser.close = AsyncMock(return_value=True)
+
+        with patch.multiple(
+            browser_module,
+            _browser=fake_browser,
+            _browser_cookie_export_path=None,
+            _browser_lease=lease,
+        ):
+            browser_module.note_activity()
+            closed = await browser_module.release_profile_if_idle_or_requested()
+
+        assert closed, (
+            "an owner that held the profile for exactly the hold window kept it, "
+            "so the waiter is told to wait past the window it was promised"
+        )
+        fake_browser.close.assert_awaited_once()
+        lease.release.assert_called_once()
+
 
 class TestTheHandoffAsksTheLeaseTheBrowserHolds:
     """Both handoff questions are about the profile this browser is sitting on.
@@ -725,16 +791,14 @@ class TestTheHandoffAsksTheLeaseTheBrowserHolds:
         looked_up.assert_not_called()
 
 
-class TestFailedLoginStillRestores:
-    """A failed login must put the previous session back.
+class TestAFailedLoginLeavesTheSession:
+    """A login that does not sign in never touches the previous session.
 
-    Restore takes the profile exclusively, and the login flow marks its own
-    browser live, so the liveness flag has to be cleared first on a confirmed
-    close — otherwise every failed login refuses to restore and the user is left
-    logged out of a session that was working.
+    The browser runs in an attempt directory of its own, so nothing has to be
+    restored: the source is only replaced once a new session exists.
     """
 
-    async def test_restore_runs_after_a_failed_login(
+    async def test_the_previous_session_is_still_there(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         from linkedin_mcp_server import setup as setup_module
@@ -744,7 +808,7 @@ class TestFailedLoginStillRestores:
         (profile / "Default").mkdir()
         (profile / "Default" / "Cookies").write_text("previous session")
 
-        async def failing_login(user_data_dir, *, config, state):  # type: ignore[no-untyped-def]
+        async def failing_login(pending, *, config, state, **_kwargs):  # type: ignore[no-untyped-def]
             state.close_confirmed = True  # the browser did close cleanly
             return False
 
@@ -752,9 +816,7 @@ class TestFailedLoginStillRestores:
         monkeypatch.setattr(setup_module, "close_browser", AsyncMock(return_value=None))
 
         assert await setup_module.interactive_login(profile) is False
-        assert (profile / "Default" / "Cookies").read_text() == "previous session", (
-            "the previous session was not restored after a failed login"
-        )
+        assert (profile / "Default" / "Cookies").read_text() == "previous session"
 
 
 class TestConfirmedClose:
@@ -859,62 +921,60 @@ class TestConfirmedClose:
         assert not lease.held
 
 
-class TestALoginWaitsForTheProfile:
-    """A login asks for the profile and waits, rather than demanding it at once.
+class TestALoginDoesNotHoldTheProfile:
+    """The login browser opens while another process holds the profile.
 
-    This is also the path a frontend takes when the shared browser asks it to sign
-    in, and a proxy holds no lease of its own to reuse. Left non-blocking, any
-    momentary holder anywhere on the machine leaves the user with a login that
-    refuses to open and nothing they can do about it.
+    Only the promotion takes the source lease, and only once the browser has
+    closed. Past the handover window an explicit login reports the browser
+    busy and leaves the source as it was; a guarded one whose peer published
+    meanwhile reports success.
     """
 
-    async def test_it_waits_for_a_real_holder_to_let_go(
+    async def test_the_browser_opens_while_a_holder_keeps_it_and_promotion_waits(
         self, isolate_profile_dir, monkeypatch
     ):
+        from linkedin_mcp_server.session_state import load_source_state
         from linkedin_mcp_server.setup import interactive_login
 
-        auth_root = isolate_profile_dir.parent
-        # A real second process, because the lease is a kernel lock: an in-process
-        # stand-in would be reference-counted and simply succeed.
-        holder = _hold_profile(auth_root, seconds=1.5)
+        holder = _hold_profile(isolate_profile_dir.parent, seconds=2.0)
+        held_since = time.monotonic()
+        held_at_launch: list[bool] = []
 
-        opened: list[bool] = []
-
-        async def login_once_we_have_the_profile(user_data_dir, lease, state):
-            opened.append(True)
-            return True
+        def note(_pending) -> None:
+            held_at_launch.append(holder.poll() is None)
 
         monkeypatch.setattr(
-            "linkedin_mcp_server.setup._login_holding_the_profile",
-            login_once_we_have_the_profile,
+            "linkedin_mcp_server.setup._login_into_fresh_profile",
+            _signs_in(then=note),
         )
         monkeypatch.setattr("linkedin_mcp_server.setup.close_browser", AsyncMock())
 
         try:
             assert await interactive_login(isolate_profile_dir) is True
+            assert time.monotonic() - held_since >= 1.0
         finally:
             holder.wait(timeout=10)
 
-        assert opened == [True]
+        assert held_at_launch == [True]
+        assert load_source_state(isolate_profile_dir) is not None
 
-    async def test_it_still_gives_up_on_a_holder_that_never_releases(
+    async def test_past_the_deadline_an_explicit_login_is_busy_and_changes_nothing(
         self, isolate_profile_dir, monkeypatch
     ):
-        # Bounded, not indefinite. Past the handover window the holder is a process
-        # that is not going to release, and hanging would be worse than saying so.
         from linkedin_mcp_server.exceptions import BrowserBusyError
+        from linkedin_mcp_server.login_attempt import attempts_root
+        from linkedin_mcp_server.session_state import load_source_state
         from linkedin_mcp_server.setup import interactive_login
 
-        auth_root = isolate_profile_dir.parent
-        holder = _hold_profile(auth_root, seconds=30)
+        previous = _write_session(isolate_profile_dir)
+        holder = _hold_profile(isolate_profile_dir.parent, seconds=30)
 
         monkeypatch.setattr(
             "linkedin_mcp_server.setup.PROFILE_HANDOVER_WAIT_SECONDS", 0.3
         )
         monkeypatch.setattr("linkedin_mcp_server.setup.close_browser", AsyncMock())
-        never = MagicMock()
         monkeypatch.setattr(
-            "linkedin_mcp_server.setup._login_holding_the_profile", never
+            "linkedin_mcp_server.setup._login_into_fresh_profile", _signs_in()
         )
 
         try:
@@ -924,7 +984,47 @@ class TestALoginWaitsForTheProfile:
             holder.kill()
             holder.wait(timeout=10)
 
-        never.assert_not_called()
+        state = load_source_state(isolate_profile_dir)
+        assert state is not None and state.login_generation == previous
+        assert list(attempts_root(isolate_profile_dir).iterdir()) == []
+
+    async def test_a_guarded_login_whose_peer_published_while_it_waited_succeeds(
+        self, isolate_profile_dir, monkeypatch
+    ):
+        from linkedin_mcp_server import profile_lease
+        from linkedin_mcp_server.session_state import load_source_state
+        from linkedin_mcp_server.setup import interactive_login
+
+        holder = _hold_profile(isolate_profile_dir.parent, seconds=30)
+        published: list[str] = []
+        real_acquire = profile_lease.ProfileLease.acquire
+
+        async def peer_publishes_as_we_ask(self, timeout):
+            if not published:
+                published.append(_write_session(isolate_profile_dir))
+            return await real_acquire(self, timeout)
+
+        monkeypatch.setattr(
+            profile_lease.ProfileLease, "acquire", peer_publishes_as_we_ask
+        )
+        monkeypatch.setattr(
+            "linkedin_mcp_server.setup.PROFILE_HANDOVER_WAIT_SECONDS", 0.3
+        )
+        monkeypatch.setattr("linkedin_mcp_server.setup.close_browser", AsyncMock())
+        monkeypatch.setattr(
+            "linkedin_mcp_server.setup._login_into_fresh_profile", _signs_in()
+        )
+
+        try:
+            assert (
+                await interactive_login(isolate_profile_dir, superseded_by=None) is True
+            )
+        finally:
+            holder.kill()
+            holder.wait(timeout=10)
+
+        state = load_source_state(isolate_profile_dir)
+        assert state is not None and state.login_generation == published[0]
 
 
 class TestALateLoginDoesNotUndoAnEarlierOne:
@@ -967,14 +1067,7 @@ class TestALateLoginDoesNotUndoAnEarlierOne:
         set_config(AppConfig())
 
         opened: list[bool] = []
-
-        async def signed_in(user_data_dir, config, state):
-            opened.append(True)
-            state.browser_opened = True
-            state.close_confirmed = True
-            return True
-
-        monkeypatch.setattr(setup, "_login_into_fresh_profile", signed_in)
+        monkeypatch.setattr(setup, "_login_into_fresh_profile", _signs_in(opened))
         monkeypatch.setattr(setup, "close_browser", AsyncMock())
         return opened
 
@@ -1237,63 +1330,43 @@ class TestALateImportDoesNotUndoALogin:
 
 
 class TestEveryLaunchPathStartsAGuardian:
-    """A crash frees the lease; the guardian is what keeps holding the profile.
+    """A crash frees a lock; the guardian is what keeps holding it.
 
-    ``drivers.browser`` starts one for the shared launch. The CLI login and the
-    session import each build a ``BrowserManager`` of their own and never reach
-    that code, so each has to start its own. Asserted on the descriptor rather
-    than on the call alone, because a guardian handed anything else holds
-    nothing, and on the release because there is one guardian per process: kept
-    past a proved teardown it would hold an unlocked descriptor while every
-    later launch reused it.
+    ``drivers.browser`` starts one for the shared launch on the source lease.
+    A login starts its own on its attempt lock, and the session import starts
+    one on the source lease, because each builds a ``BrowserManager`` of its
+    own. Asserted on the descriptor, because a guardian handed anything else
+    holds nothing, and on the release after a proved teardown.
     """
 
-    async def test_the_login_starts_one_holding_its_own_lease(
+    async def test_the_login_starts_one_holding_its_attempt_lock(
         self, isolate_profile_dir, monkeypatch
     ):
+        import linkedin_mcp_server.login_attempt as login_attempt
         import linkedin_mcp_server.setup as setup_module
-        from linkedin_mcp_server.config import set_config
-        from linkedin_mcp_server.config.schema import AppConfig
 
-        # The launch options this test stubs past still read process-global
-        # config, so install known defaults rather than inherit another test's.
-        set_config(AppConfig())
+        events: list[str] = []
 
-        lease = get_profile_lease(isolate_profile_dir)
-        assert lease.try_acquire()
-        try:
-            events: list[str] = []
-            monkeypatch.setattr(
-                setup_module,
-                "start_browser_guardian",
-                lambda fd: events.append(f"start {fd}"),
-            )
-            monkeypatch.setattr(
-                setup_module,
-                "release_browser_guardian",
-                lambda: events.append("release"),
-            )
-            monkeypatch.setattr(
-                setup_module, "rotate_shielded", AsyncMock(return_value=None)
-            )
-            state = setup_module._LoginState()
+        class Recorded:
+            def release(self) -> None:
+                events.append("release")
 
-            async def signed_in(*_args, **_kwargs) -> bool:
-                # What the real teardown reports, and the flag the release is
-                # guarded by: a login whose browser is not provably gone must
-                # keep its guardian.
-                state.close_confirmed = True
-                return True
+        monkeypatch.setattr(
+            login_attempt,
+            "start_browser_guardian",
+            lambda fd: (events.append(f"start {fd}"), Recorded())[1],
+        )
+        attempt_locks: list[int] = []
+        monkeypatch.setattr(
+            setup_module,
+            "_login_into_fresh_profile",
+            _signs_in(then=lambda pending: attempt_locks.append(pending.lock_fd)),
+        )
+        monkeypatch.setattr(setup_module, "close_browser", AsyncMock())
 
-            monkeypatch.setattr(setup_module, "_login_into_fresh_profile", signed_in)
+        assert await setup_module.interactive_login(isolate_profile_dir)
 
-            assert await setup_module._login_holding_the_profile(
-                isolate_profile_dir, lease, state
-            )
-
-            assert events == [f"start {lease.guardian_fd()}", "release"]
-        finally:
-            lease.release()
+        assert events == [f"start {attempt_locks[0]}", "release"]
 
     async def test_the_import_starts_one_holding_its_own_lease(
         self, isolate_profile_dir, monkeypatch
@@ -1304,15 +1377,15 @@ class TestEveryLaunchPathStartsAGuardian:
         assert lease.try_acquire()
         try:
             events: list[str] = []
+
+            class Recorded:
+                def release(self) -> None:
+                    events.append("release")
+
             monkeypatch.setattr(
                 orchestrate,
                 "start_browser_guardian",
-                lambda fd: events.append(f"start {fd}"),
-            )
-            monkeypatch.setattr(
-                orchestrate,
-                "release_browser_guardian",
-                lambda: events.append("release"),
+                lambda fd: (events.append(f"start {fd}"), Recorded())[1],
             )
             monkeypatch.setattr(
                 orchestrate, "rotate_shielded", AsyncMock(return_value=None)
@@ -1418,14 +1491,7 @@ class TestAMomentaryHolderDoesNotCancelTheRepair:
         dead = write_source_state(isolate_profile_dir).login_generation
 
         opened: list[bool] = []
-
-        async def signed_in(user_data_dir, *, config, state):
-            opened.append(True)
-            state.browser_opened = True
-            state.close_confirmed = True
-            return True
-
-        monkeypatch.setattr(setup, "_login_into_fresh_profile", signed_in)
+        monkeypatch.setattr(setup, "_login_into_fresh_profile", _signs_in(opened))
         monkeypatch.setattr(setup, "close_browser", AsyncMock())
         monkeypatch.setattr(bootstrap, "close_browser", AsyncMock())
 
@@ -1660,7 +1726,8 @@ class TestTheComparisonHappensUnderTheLock:
             )
         assert seen == ["the-stale-one"], seen
 
-        # The missing path, which rotates through the other helper.
+        # The missing path rotates nothing up front: the login's promotion
+        # does, under the lease, with the generation the login carries.
         seen.clear()
         bootstrap.reset_bootstrap_for_testing()
         monkeypatch.setattr(bootstrap, "get_config", lambda: config)
@@ -1670,7 +1737,8 @@ class TestTheComparisonHappensUnderTheLock:
 
         with pytest.raises(AuthenticationInProgressError):
             await bootstrap._start_login_if_needed(superseded_by="the-missing-one")
-        assert seen == ["the-missing-one"], seen
+        assert seen == [], seen
+        assert bootstrap.get_bootstrap_state().login_supersedes == "the-missing-one"
 
     async def test_a_peer_win_is_reported_as_one(
         self, isolate_profile_dir, monkeypatch
@@ -1702,14 +1770,7 @@ class TestTheComparisonHappensUnderTheLock:
         monkeypatch.setattr(bootstrap, "get_config", lambda: config)
 
         opened: list[bool] = []
-
-        async def browser_body(user_data_dir, *, config, state):
-            opened.append(True)
-            state.browser_opened = True
-            state.close_confirmed = True
-            return True
-
-        monkeypatch.setattr(setup, "_login_into_fresh_profile", browser_body)
+        monkeypatch.setattr(setup, "_login_into_fresh_profile", _signs_in(opened))
         monkeypatch.setattr(setup, "close_browser", AsyncMock())
         monkeypatch.setattr(bootstrap, "close_browser", AsyncMock())
 
@@ -1725,3 +1786,405 @@ class TestTheComparisonHappensUnderTheLock:
         surviving = load_source_state(isolate_profile_dir)
         assert surviving is not None
         assert surviving.login_generation == peer
+
+
+_LOGIN_WORKER = Path(__file__).parent / "helpers" / "login_attempt_worker.py"
+_POSIX_ONLY = pytest.mark.skipif(sys.platform == "win32", reason="POSIX guardians")
+
+
+def _login_worker(*args: str, tag: str = "") -> subprocess.Popen[str]:
+    return subprocess.Popen(
+        [sys.executable, str(_LOGIN_WORKER), *args],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        env={**os.environ, "LOGIN_WORKER_TAG": tag},
+    )
+
+
+def _say_go(process: subprocess.Popen[str]) -> None:
+    assert process.stdin is not None
+    process.stdin.write("go\n")
+    process.stdin.flush()
+
+
+def _result(process: subprocess.Popen[str]) -> str:
+    assert process.stdout is not None
+    while True:
+        line = process.stdout.readline()
+        if line.startswith("RESULT "):
+            return line.split(" ", 1)[1].strip()
+        if line == "":
+            stderr = process.stderr.read() if process.stderr else ""
+            raise AssertionError(f"worker ended without a result: {stderr}")
+
+
+def _end(process: subprocess.Popen[str]) -> None:
+    if process.poll() is None:
+        process.kill()
+    process.wait(timeout=30)
+
+
+class TestTheFirstCommittedLoginWins:
+    """Two guarded logins in two processes, each in its own attempt directory.
+
+    The one whose promotion commits first wins; the other reports success
+    without publishing. Which one saw its cookie first does not decide it.
+    """
+
+    @pytest.mark.parametrize("held_at", ["close", "lease"])
+    def test_the_one_that_got_its_cookie_first_but_was_held_back_loses(
+        self, isolate_profile_dir, held_at
+    ):
+        from linkedin_mcp_server.session_state import load_source_state
+
+        profile = str(isolate_profile_dir)
+        early = _login_worker("login", profile, "none", held_at, tag="early")
+        late = None
+        try:
+            _await_line(early, "HELD")
+            late = _login_worker("login", profile, "none", "none", tag="late")
+            assert _result(late) == "True"
+            winner = load_source_state(isolate_profile_dir)
+            assert winner is not None
+
+            _say_go(early)
+            assert _result(early) == "True"
+            assert early.wait(timeout=30) == 0
+            assert late.wait(timeout=30) == 0
+        finally:
+            _end(early)
+            if late is not None:
+                _end(late)
+
+        surviving = load_source_state(isolate_profile_dir)
+        assert surviving is not None
+        assert surviving.login_generation == winner.login_generation
+        cookies = (isolate_profile_dir / "Default" / "Cookies").read_text()
+        assert cookies == "login late"
+
+
+class TestAnAttemptOutlivesItsOwnersDoubt:
+    """An attempt is deleted only once its browser is provably gone."""
+
+    def test_an_unconfirmed_close_keeps_the_attempt_from_another_sweep(
+        self, isolate_profile_dir
+    ):
+        from linkedin_mcp_server.login_attempt import attempts_root, sweep
+
+        root = attempts_root(isolate_profile_dir)
+        owner = _login_worker(
+            "login", str(isolate_profile_dir), "unguarded", "unconfirmed"
+        )
+        try:
+            assert _result(owner) == "False"
+            kept = sorted(entry.name for entry in root.iterdir())
+            assert len(kept) == 2
+
+            sweep(root)
+
+            assert sorted(entry.name for entry in root.iterdir()) == kept
+        finally:
+            _say_go(owner)
+            _end(owner)
+
+        # Its guardian lets go once it has seen the owner's exit settle.
+        deadline = time.monotonic() + 30
+        while list(root.iterdir()):
+            assert time.monotonic() < deadline, "the lock outlived its owner"
+            time.sleep(0.05)
+            sweep(root)
+
+    @_POSIX_ONLY
+    def test_a_killed_owner_s_attempt_stays_until_its_guardian_drained(
+        self, isolate_profile_dir
+    ):
+        import signal
+
+        from linkedin_mcp_server.login_attempt import attempts_root, sweep
+
+        root = attempts_root(isolate_profile_dir)
+        owner = _login_worker("crash", str(isolate_profile_dir), "attempt")
+        try:
+            assert owner.stdout is not None
+            _, directory, browser = owner.stdout.readline().split()
+            os.kill(owner.pid, signal.SIGKILL)
+            owner.wait(timeout=30)
+
+            sweep(root)
+            assert Path(directory).is_dir(), "swept while its browser could run"
+
+            deadline = time.monotonic() + 30
+            while Path(directory).exists():
+                assert time.monotonic() < deadline, "the guardian never let go"
+                time.sleep(0.05)
+                sweep(root)
+            with pytest.raises(ProcessLookupError):
+                os.kill(int(browser), 0)
+        finally:
+            _end(owner)
+
+
+class TestEachLockHasItsOwnGuardian:
+    """A pending login and a serving browser can be live in one process.
+
+    A peer publishes, the next tool call opens the serving browser, and the
+    pending login has not polled yet. Each holds its own lock through its own
+    guardian, and closing one does not release the other.
+    """
+
+    @_POSIX_ONLY
+    def test_releasing_the_serving_guardian_keeps_the_attempt_guarded(
+        self, isolate_profile_dir
+    ):
+        import signal
+
+        from linkedin_mcp_server.login_attempt import attempts_root, sweep
+
+        root = attempts_root(isolate_profile_dir)
+        owner = _login_worker("crash", str(isolate_profile_dir), "released")
+        try:
+            assert owner.stdout is not None
+            _, directory, browser = owner.stdout.readline().split()
+            os.kill(owner.pid, signal.SIGKILL)
+            owner.wait(timeout=30)
+
+            sweep(root)
+            assert Path(directory).is_dir(), "the attempt lost its guardian"
+
+            deadline = time.monotonic() + 30
+            while Path(directory).exists():
+                assert time.monotonic() < deadline, "the guardian never let go"
+                time.sleep(0.05)
+                sweep(root)
+            with pytest.raises(ProcessLookupError):
+                os.kill(int(browser), 0)
+        finally:
+            _end(owner)
+
+    @_POSIX_ONLY
+    def test_a_crash_with_both_live_frees_neither_lock_before_its_browsers(
+        self, isolate_profile_dir
+    ):
+        import signal
+
+        from linkedin_mcp_server.login_attempt import attempts_root, sweep
+        from linkedin_mcp_server.profile_lease import ProfileLease
+
+        root = attempts_root(isolate_profile_dir)
+        owner = _login_worker("crash", str(isolate_profile_dir), "both")
+        contender = ProfileLease(isolate_profile_dir.parent)
+        try:
+            assert owner.stdout is not None
+            _, directory, *browsers = owner.stdout.readline().split()
+            os.kill(owner.pid, signal.SIGKILL)
+            owner.wait(timeout=30)
+
+            sweep(root)
+            assert Path(directory).is_dir()
+
+            deadline = time.monotonic() + 30
+            while not contender.try_acquire():
+                assert time.monotonic() < deadline, "the source lease stayed held"
+                time.sleep(0.01)
+            for pid in browsers:
+                with pytest.raises(ProcessLookupError):
+                    os.kill(int(pid), 0)
+            while Path(directory).exists():
+                assert time.monotonic() < deadline, "the attempt lock stayed held"
+                time.sleep(0.05)
+                sweep(root)
+        finally:
+            contender.release()
+            _end(owner)
+
+
+class TestALogoutFencesAnOpenLogin:
+    """A login open across a logout must not publish after it."""
+
+    async def test_a_logout_between_the_cookie_and_the_promotion_wins(
+        self, isolate_profile_dir, monkeypatch
+    ):
+        from linkedin_mcp_server.session_state import load_source_state
+        from linkedin_mcp_server.setup import interactive_login
+
+        _write_session(isolate_profile_dir)
+        monkeypatch.setattr(
+            "linkedin_mcp_server.setup._login_into_fresh_profile",
+            _signs_in(then=lambda _pending: clear_auth_state(isolate_profile_dir)),
+        )
+        monkeypatch.setattr("linkedin_mcp_server.setup.close_browser", AsyncMock())
+
+        assert await interactive_login(isolate_profile_dir) is False
+
+        assert load_source_state(isolate_profile_dir) is None
+        assert not isolate_profile_dir.exists()
+
+    async def test_the_logout_command_on_an_empty_source_fences_it_too(
+        self, isolate_profile_dir, monkeypatch, capsys
+    ):
+        from linkedin_mcp_server.session_state import load_source_state
+        from linkedin_mcp_server.setup import interactive_login
+
+        logged_out: list[subprocess.CompletedProcess[str]] = []
+
+        def logout(_pending) -> None:
+            logged_out.append(
+                subprocess.run(
+                    [sys.executable, "-m", "linkedin_mcp_server", "--logout"],
+                    capture_output=True,
+                    encoding="utf-8",
+                    timeout=120,
+                    env={
+                        **os.environ,
+                        "USER_DATA_DIR": str(isolate_profile_dir),
+                        "PYTHONIOENCODING": "utf-8",
+                    },
+                )
+            )
+
+        monkeypatch.setattr(
+            "linkedin_mcp_server.setup._login_into_fresh_profile",
+            _signs_in(then=logout),
+        )
+        monkeypatch.setattr("linkedin_mcp_server.setup.close_browser", AsyncMock())
+
+        assert await interactive_login(isolate_profile_dir) is False
+
+        assert logged_out[0].returncode == 0, logged_out[0].stdout
+        assert "Nothing to clear." in logged_out[0].stdout
+        assert load_source_state(isolate_profile_dir) is None
+        assert "Signed out while this login was open" in capsys.readouterr().out
+
+    def test_a_session_saved_during_the_logout_check_is_kept(
+        self, isolate_profile_dir, monkeypatch, capsys
+    ):
+        import linkedin_mcp_server.cli_main as cli_main
+        from linkedin_mcp_server.session_state import load_source_state
+
+        published: list[str] = []
+        real = cli_main.source_state_path
+
+        class SavedRightAfterLooking:
+            def __init__(self, path: Path) -> None:
+                self._path = path
+
+            def exists(self) -> bool:
+                seen = self._path.exists()
+                published.append(_write_session(isolate_profile_dir))
+                return seen
+
+        monkeypatch.setattr(
+            cli_main,
+            "source_state_path",
+            lambda profile: SavedRightAfterLooking(real(profile)),
+        )
+
+        with pytest.raises(SystemExit) as exited:
+            cli_main.clear_profile_and_exit()
+
+        assert exited.value.code == 1
+        assert "run --logout again" in capsys.readouterr().out
+        state = load_source_state(isolate_profile_dir)
+        assert state is not None and state.login_generation == published[0]
+
+
+class TestReadinessFollowsTheSessionOnDisk:
+    """A finished login reports a session only while one is stored.
+
+    A guarded login that stood down for a peer returns success, and a logout
+    from another process can remove the peer's session before anyone reads
+    the task. Neither the reconciled state nor the status may then claim one.
+    """
+
+    async def test_a_peer_hint_then_a_logout_is_not_a_signed_in_login(
+        self, isolate_profile_dir, monkeypatch
+    ):
+        import asyncio
+
+        import linkedin_mcp_server.bootstrap as bootstrap
+        from linkedin_mcp_server.session_status import session_status
+        from linkedin_mcp_server.setup import interactive_login
+
+        monkeypatch.setattr("linkedin_mcp_server.setup.close_browser", AsyncMock())
+        _write_session(isolate_profile_dir)
+
+        async def login_flow() -> None:
+            assert await interactive_login(
+                isolate_profile_dir, superseded_by="the-dead-one"
+            )
+
+        task = asyncio.ensure_future(login_flow())
+        await task
+        state = bootstrap.get_bootstrap_state()
+        state.login_task = task
+
+        stored = session_status()
+        assert stored["session"]["stored"] is True
+        assert stored["login"] == "auth_ready"
+
+        clear_auth_state(isolate_profile_dir)
+
+        before_refresh = session_status()
+        assert before_refresh["session"]["stored"] is False
+        assert before_refresh["login"] != "auth_ready"
+
+        await bootstrap._refresh_background_task_state()
+        assert state.auth_state is not bootstrap.AuthState.READY
+        assert session_status()["login"] != "auth_ready"
+
+    async def test_a_stored_ready_state_does_not_outlive_a_logout(
+        self, isolate_profile_dir
+    ):
+        import linkedin_mcp_server.bootstrap as bootstrap
+        from linkedin_mcp_server.session_status import session_status
+
+        _write_session(isolate_profile_dir)
+        bootstrap.get_bootstrap_state().auth_state = bootstrap.AuthState.READY
+        assert session_status()["login"] == "auth_ready"
+
+        clear_auth_state(isolate_profile_dir)
+
+        status = session_status()
+        assert status["session"]["stored"] is False
+        assert status["login"] != "auth_ready"
+
+
+class TestAMissingSessionStartsItsOwnLogin:
+    """A login starts while a peer holds the profile to promote its own.
+
+    Retiring leftovers needs the lease, and the promotion does that under it.
+    Asking for it before the login starts turned a momentary holder into a
+    refusal, and the second attempt never opened.
+    """
+
+    async def test_a_held_profile_does_not_stop_the_login_from_starting(
+        self, isolate_profile_dir, monkeypatch
+    ):
+        import linkedin_mcp_server.bootstrap as bootstrap
+        from linkedin_mcp_server.config import set_config
+        from linkedin_mcp_server.config.schema import AppConfig
+        from linkedin_mcp_server.exceptions import AuthenticationInProgressError
+
+        config = AppConfig()
+        config.browser.user_data_dir = str(isolate_profile_dir)
+        config.browser.auto_import_from_browser = False
+        config.browser.login_inline_wait_seconds = 0
+        set_config(config)
+        monkeypatch.setattr(bootstrap, "get_config", lambda: config)
+        monkeypatch.setattr(bootstrap, "_run_login_flow", AsyncMock())
+
+        # Leftovers of an earlier session, so there is something to retire.
+        (isolate_profile_dir / "Default").mkdir(parents=True)
+        (isolate_profile_dir / "Default" / "Cookies").write_text("leftover")
+
+        holder = _hold_profile(isolate_profile_dir.parent, seconds=30)
+        try:
+            with pytest.raises(AuthenticationInProgressError):
+                await bootstrap._start_login_if_needed(superseded_by=None)
+        finally:
+            holder.kill()
+            holder.wait(timeout=10)
+
+        assert bootstrap.get_bootstrap_state().login_task is not None

@@ -10,6 +10,7 @@ from unittest.mock import AsyncMock, MagicMock, call
 import mcp.types as mt
 import pytest
 from fastmcp import Client, FastMCP
+from fastmcp.client.elicitation import ElicitResult
 from fastmcp.server.middleware import MiddlewareContext
 
 import linkedin_mcp_server.server as server_module
@@ -168,6 +169,28 @@ def _server_for(role: ServerRole) -> FastMCP:
 #: Every local tool as ``tools/list`` puts it on the wire. A difference is a
 #: change every client sees, so update the file only for an intended one.
 _TOOL_CONTRACT = Path(__file__).parent / "fixtures" / "tool-contract" / "tools.json"
+#: The tools only the Docker image's Direct server adds: the sign-in view's, in
+#: the same form.
+_LOGIN_APP_CONTRACT = _TOOL_CONTRACT.with_name("login-app-tools.json")
+
+
+def _docker_tool_contract() -> list[dict[str, Any]]:
+    """What the Docker image's Direct server lists: every shared tool plus the view's."""
+    shared = json.loads(_TOOL_CONTRACT.read_text(encoding="utf-8"))
+    login_app = json.loads(_LOGIN_APP_CONTRACT.read_text(encoding="utf-8"))
+    return sorted([*shared, *login_app], key=lambda tool: tool["name"])
+
+
+#: Each install as its launcher declares it in ``LINKEDIN_MCP_RUNTIME``; uvx and
+#: a source checkout set nothing.
+_EVERY_INSTALL = pytest.mark.parametrize(
+    "install", ["unset", "mcpb", "docker"], ids=["no marker", "mcpb", "docker"]
+)
+
+
+def _installed_as(monkeypatch: pytest.MonkeyPatch, install: str) -> None:
+    if install != "unset":
+        monkeypatch.setenv("LINKEDIN_MCP_RUNTIME", install)
 
 
 #: Each client mode with the era it must actually negotiate. Written out rather
@@ -223,6 +246,7 @@ def _stand_in_the_lifespan(monkeypatch: pytest.MonkeyPatch) -> None:
         "start_background_browser_setup_if_needed",
         "watch_for_handoff_requests",
         "stop_background_browser_setup",
+        "stop_login",
         "close_browser",
     ):
         monkeypatch.setattr(server_module, name, AsyncMock())
@@ -234,11 +258,13 @@ class TestToolContract:
     @pytest.mark.parametrize(
         "role", [role for role in ServerRole if role.drives_browser]
     )
+    @_EVERY_INSTALL
     @_BOTH_ERAS
     async def test_the_served_tools_match_the_recorded_contract(
         self,
         monkeypatch: pytest.MonkeyPatch,
         role: ServerRole,
+        install: str,
         mode: str,
         protocol: str,
     ):
@@ -246,11 +272,50 @@ class TestToolContract:
         # argument that leaks into `inputSchema`, a lost `outputSchema` or a
         # changed safety annotation is a change every client sees. Both eras a
         # client may speak, because the fixture was recorded on the handshake
-        # era and a current client negotiates the other one.
-        recorded = json.loads(_TOOL_CONTRACT.read_text(encoding="utf-8"))
+        # era and a current client negotiates the other one. Only the Docker
+        # image's Direct server adds the sign-in view's tools; every other
+        # server lists exactly the shared ones.
+        _installed_as(monkeypatch, install)
+        if role is ServerRole.DIRECT and install == "docker":
+            recorded = _docker_tool_contract()
+        else:
+            recorded = json.loads(_TOOL_CONTRACT.read_text(encoding="utf-8"))
 
         assert (
             await _served_tool_contract(monkeypatch, role, mode, protocol) == recorded
+        )
+
+    @_EVERY_INSTALL
+    @_BOTH_ERAS
+    async def test_only_the_docker_direct_server_offers_the_sign_in_page(
+        self, monkeypatch: pytest.MonkeyPatch, install: str, mode: str, protocol: str
+    ):
+        # The page `open_login` names in its `_meta.ui.resourceUri`. An owner
+        # has no client to show it to, and resources are not forwarded.
+        _installed_as(monkeypatch, install)
+        _stand_in_the_lifespan(monkeypatch)
+
+        async def resources(role: ServerRole) -> list[dict[str, Any]]:
+            async with Client(_server_for(role), mode=mode) as client:
+                assert client.protocol_version == protocol
+                listed = await client.list_resources()
+            return [
+                resource.model_dump(mode="json", by_alias=True, exclude_none=True)
+                for resource in listed
+            ]
+
+        page = {
+            "name": "login_view",
+            "title": "LinkedIn sign-in",
+            "uri": "ui://linkedin-mcp/login.html",
+            "description": "The page open_login shows to sign in to LinkedIn.",
+            "mimeType": "text/html;profile=mcp-app",
+            "_meta": {"ui": {"prefersBorder": True}, "fastmcp": {"tags": []}},
+        }
+
+        assert await resources(ServerRole.OWNER) == []
+        assert await resources(ServerRole.DIRECT) == (
+            [page] if install == "docker" else []
         )
 
     @_BOTH_ERAS
@@ -356,26 +421,36 @@ class TestServerRoles:
                 _has_middleware(mcp, UpdateNoticeMiddleware) == role.faces_a_client
             ), role
 
-    def test_every_role_that_drives_a_browser_serves_the_same_tools(self):
+    @_EVERY_INSTALL
+    def test_every_role_that_drives_a_browser_serves_the_same_tools(
+        self, monkeypatch: pytest.MonkeyPatch, install: str
+    ):
         # A tool present in one role and missing from another would disappear
         # from a client's list depending on how its server happened to start.
+        # The one exception is the sign-in view, which only the Docker image's
+        # Direct server shows, and it adds exactly its five tools.
         #
         # A proxy is deliberately not in here: it registers none of these and
         # serves the owner's instead, which is a different claim and has its own
         # test below.
+        _installed_as(monkeypatch, install)
+
         async def tool_names(role: ServerRole) -> set[str]:
             tools = await _server_for(role).list_tools()
             return {tool.name for tool in tools}
 
-        served = {
-            role: asyncio.run(tool_names(role))
-            for role in ServerRole
-            if role.drives_browser
-        }
+        direct = asyncio.run(tool_names(ServerRole.DIRECT))
+        owner = asyncio.run(tool_names(ServerRole.OWNER))
 
-        assert len(served) > 1
-        assert len(set(map(frozenset, served.values()))) == 1
-        assert "get_person_profile" in served[ServerRole.DIRECT]
+        view = {
+            "open_login",
+            "login_view_attach",
+            "login_view_frame",
+            "login_view_input",
+        }
+        assert direct - owner == (view if install == "docker" else set())
+        assert owner <= direct
+        assert "get_person_profile" in owner
 
     def test_the_role_is_readable_without_importing_the_server(self):
         # The reason the enum lives in its own module. Behaviour has to differ
@@ -573,6 +648,48 @@ class TestProxyRole:
             served = {tool.name for tool in await client.list_tools()}
 
         assert served == {"get_person_profile", "search_jobs"}
+
+    @_BOTH_ERAS
+    @pytest.mark.parametrize(
+        ("answer", "sent"),
+        [({"confirm": True}, ["Hello"]), (ElicitResult(action="decline"), [])],
+        ids=["accepted", "declined"],
+    )
+    async def test_a_proxy_asks_the_user_before_it_forwards_a_write(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        mode: str,
+        protocol: str,
+        answer: Any,
+        sent: list[str],
+    ):
+        messages: list[str] = []
+        owner = FastMCP("owner")
+
+        @owner.tool
+        async def send_message(
+            linkedin_username: str, message: str, confirm_send: bool
+        ) -> dict[str, bool]:
+            messages.append(message)
+            return {"sent": True}
+
+        async def user(*_: Any) -> Any:
+            return answer
+
+        proxy = _proxy_to(monkeypatch, owner)
+        async with Client(proxy, mode=mode, elicitation_handler=user) as client:
+            assert client.protocol_version == protocol
+            await client.call_tool(
+                "send_message",
+                {
+                    "linkedin_username": "someone",
+                    "message": "Hello",
+                    "confirm_send": True,
+                },
+                raise_on_error=False,
+            )
+
+        assert messages == sent
 
     async def test_a_proxy_registers_none_of_its_own_tools(
         self, monkeypatch: pytest.MonkeyPatch

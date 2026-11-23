@@ -175,6 +175,7 @@ def register_job_tools(
         work_type: str | None = None,
         easy_apply: bool = False,
         sort_by: str | None = None,
+        start: Annotated[int, Field(ge=0)] = 0,
     ) -> dict[str, Any]:
         """
         Search for jobs on LinkedIn.
@@ -182,11 +183,11 @@ def register_job_tools(
         Returns job_ids that can be passed to get_job_details for full info.
 
         LinkedIn is moving accounts to a redesigned job search, which keeps
-        only the keywords, date_posted and paging. It drops the filters
-        marked "Classic search only" and reports them in section_errors as
-        filters_dropped. When it drops the location or work type, search again
-        with them in the keywords ("remote python developer in Lyon") and keep
-        doing so; words such as "senior" or "internship" there narrow the
+        only the keywords, date_posted, easy_apply and paging. It drops the
+        filters marked "Classic search only" and reports them in section_errors
+        as filters_dropped. When it drops the location or work type, search
+        again with them in the keywords ("remote python developer in Lyon") and
+        keep doing so; words such as "senior" or "internship" there narrow the
         results too. Quotes do not make a phrase exact on that search.
 
         Args:
@@ -198,8 +199,12 @@ def register_job_tools(
             job_type: Filter by job type, comma-separated (full_time, part_time, contract, temporary, volunteer, internship, other). Classic search only.
             experience_level: Filter by experience level, comma-separated (internship, entry, associate, mid_senior, director, executive). Classic search only.
             work_type: Filter by work type, comma-separated (on_site, remote, hybrid). Classic search only.
-            easy_apply: Only show Easy Apply jobs (default false). Classic search only.
+            easy_apply: Only show Easy Apply jobs (default false).
             sort_by: Sort results (date, relevance). Classic search only.
+            start: Result offset to begin at (default 0). Pass a previous
+                call's pagination.next_offset, with the same search
+                arguments, to continue where it stopped. Results can shift
+                between calls, so a continuation may repeat a job id.
 
         Returns:
             Dict with url, sections (name -> raw text), job_ids (list of
@@ -243,6 +248,7 @@ def register_job_tools(
             work_type=work_type,
             easy_apply=easy_apply,
             sort_by=sort_by,
+            start=start,
             # What is left of the figure FastMCP cancels this call on.
             tool_timeout=max(0.0, tool_timeout - (time.monotonic() - started)),
         )

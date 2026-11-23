@@ -1177,6 +1177,10 @@ async def _sidebar_scenario() -> dict[str, Any]:
     )
 
 
+# What the page reports for its zone: the zone message times are rendered in.
+PAGE_TIME_ZONE = {"id": "Europe/Berlin", "offsetMinutes": 60}
+
+
 async def _conversation_scenario(method: str) -> dict[str, Any]:
     name = f"{method}__baseline"
     recorder = TraceRecorder(name, _COMMON_ALLOWED)
@@ -1191,6 +1195,7 @@ async def _conversation_scenario(method: str) -> dict[str, Any]:
             "wait_for_selector:conversation_rows",
             PlaywrightTimeoutError("no scripted rows"),
         )
+    page.script("evaluate:page_time_zone", PAGE_TIME_ZONE)
     extractor = _extractor(page)
     async with boundaries(recorder, clock):
         with recorder.context(method, "conversation"):
@@ -1305,6 +1310,7 @@ async def _conversation_row_resolution_scenario() -> dict[str, Any]:
     page.script("evaluate:root_content", _root("Conversation content"))
     page.script("wait_for_selector:conversation_rows", None)
     page.script("evaluate:conversation_thread_refs", ROW_CLICK_STOPPED_OUTCOME)
+    page.script("evaluate:page_time_zone", PAGE_TIME_ZONE)
     extractor = _extractor(page)
     async with boundaries(recorder, clock):
         with recorder.context("get_inbox", "conversation"):

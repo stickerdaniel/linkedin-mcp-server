@@ -3574,6 +3574,41 @@ class TestBrowserLaunchEvidenceHelpers:
         assert attempted == [1, 2, 3]
         assert samples == ["cdp", "cdp"]
 
+    @pytest.mark.parametrize("failing_pass", [1, 2], ids=["first-pass", "recheck"])
+    def test_a_member_exiting_under_validation_restarts_the_census(
+        self, failing_pass: int
+    ) -> None:
+        exited: set[int] = set()
+        validations: list[int] = []
+        closed: list[int] = []
+        waits: list[str] = []
+
+        def validate_handle(pid: int, _handle: int) -> None:
+            validations.append(pid)
+            if pid == 4 and validations.count(4) == failing_pass:
+                exited.add(pid)
+                raise probe.CensusMemberExitedError("Job member 4 exited")
+
+        cdp, retained = probe.retain_stable_browser_inventory(
+            sample_cdp=lambda: [
+                {"id": 2, "type": "browser"},
+                {"id": 3, "type": "renderer"},
+            ],
+            sample_job_pids=lambda: {1, 2, 3, 4} - exited,
+            open_handle=lambda pid: pid,
+            validate_handle=validate_handle,
+            close_handle=closed.append,
+            driver_pid=1,
+            deadline=10,
+            wait_for_retry=lambda: waits.append("wait"),
+            monotonic=lambda: 0,
+        )
+
+        assert cdp == {2: "browser", 3: "renderer"}
+        assert retained == {1: 1, 2: 2, 3: 3}
+        assert sorted(closed) == [1, 2, 3, 4]
+        assert waits == ["wait"]
+
     def test_handle_waits_share_one_deadline(self) -> None:
         times = iter([0.0, 0.4])
         timeouts: list[int] = []
@@ -3731,6 +3766,85 @@ class TestBrowserLaunchEvidenceHelpers:
 
     def test_browser_launch_routes_separately(self) -> None:
         assert probe.topology_runner("browser-launch-owner-loss") == "browser-launch"
+
+
+class _CtypesWinError(OSError):
+    """The shape of ``ctypes.WinError(code)``: an ``OSError`` carrying
+    ``winerror``. CI printed the census failure as ``PermissionError:
+    [WinError 5] Access is denied.``. POSIX ``OSError`` ignores the
+    ``winerror`` constructor argument, so it is set here."""
+
+    def __init__(self, winerror: int, strerror: str) -> None:
+        super().__init__(None, strerror)
+        self.winerror = winerror
+
+
+def _access_denied() -> OSError:
+    return _CtypesWinError(5, "Access is denied.")
+
+
+class TestCensusImagePath:
+    def _read(
+        self, error: BaseException, *, exits: bool, deadline: float = 10.0
+    ) -> tuple[list[float], pytest.ExceptionInfo[BaseException]]:
+        waits: list[float] = []
+
+        def query() -> str:
+            raise error
+
+        def wait_exited(seconds: float) -> bool:
+            waits.append(seconds)
+            return exits
+
+        with pytest.raises(BaseException) as raised:
+            probe.require_census_image_path(
+                4,
+                query,
+                wait_exited=wait_exited,
+                deadline=deadline,
+                monotonic=lambda: 0.0,
+            )
+        return waits, raised
+
+    def test_a_readable_member_returns_its_path(self) -> None:
+        assert (
+            probe.require_census_image_path(
+                4,
+                lambda: r"C:\chrome.exe",
+                wait_exited=lambda _seconds: pytest.fail("no wait without a fault"),
+                deadline=10.0,
+            )
+            == r"C:\chrome.exe"
+        )
+
+    def test_access_denied_from_an_exiting_member_is_churn(self) -> None:
+        error = _access_denied()
+        waits, raised = self._read(error, exits=True)
+        assert raised.type is probe.CensusMemberExitedError
+        assert raised.value.__cause__ is error
+        assert waits == [5.0]
+
+    def test_access_denied_from_a_live_member_stays_fatal(self) -> None:
+        waits, raised = self._read(_access_denied(), exits=False)
+        assert raised.type is RuntimeError
+        assert "live Job member 4" in str(raised.value)
+        assert waits == [5.0]
+
+    def test_the_exit_wait_is_bounded_by_the_census_deadline(self) -> None:
+        waits, raised = self._read(_access_denied(), exits=True, deadline=0.25)
+        assert raised.type is probe.CensusMemberExitedError
+        assert waits == [0.25]
+
+    def test_an_expired_deadline_does_not_wait(self) -> None:
+        waits, raised = self._read(_access_denied(), exits=True, deadline=0.0)
+        assert raised.type is RuntimeError
+        assert waits == []
+
+    def test_another_error_is_raised_unchanged(self) -> None:
+        error = _CtypesWinError(87, "The parameter is incorrect.")
+        waits, raised = self._read(error, exits=True)
+        assert raised.value is error
+        assert waits == []
 
 
 class TestReviewedBrowserLaunchRepairs:

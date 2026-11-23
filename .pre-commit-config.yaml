@@ -1,4 +1,7 @@
 # .pre-commit-config.yaml
+# The vendored MCP Apps SDK ships byte for byte; tests/test_login_app_package.py
+# pins its sha256, so no hook may rewrite it; it is also over the size limit.
+exclude: ^linkedin_mcp_server/login_app/(ext-apps-app-with-deps-[0-9.]+\.js|EXT_APPS_LICENSE|ZOD_LICENSE)$
 repos:
 -   repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v6.0.0
@@ -12,7 +15,7 @@ repos:
 
 -   repo: https://github.com/astral-sh/ruff-pre-commit
     # Ruff version.
-    rev: v0.17.4
+    rev: v0.17.6
     hooks:
     -   id: ruff
         args: [--fix]
@@ -30,6 +33,12 @@ repos:
     -   id: linkedin-architecture
         name: linkedin architecture
         entry: uv run python scripts/generate_linkedin_architecture.py --check
+        language: system
+        pass_filenames: false
+        always_run: true
+    -   id: selector-policy
+        name: selector policy
+        entry: uv run python scripts/check_selector_policy.py
         language: system
         pass_filenames: false
         always_run: true
