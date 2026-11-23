@@ -657,6 +657,37 @@ class TestMinimumHoldWindow:
             lease.mark_browser_closed()
             lease.release()
 
+    async def test_an_owner_at_the_end_of_the_window_hands_over(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from linkedin_mcp_server.config import get_config, reset_config
+        from linkedin_mcp_server.drivers import browser as browser_module
+
+        monkeypatch.setenv("BROWSER_MIN_HOLD", "20")
+        reset_config()
+
+        lease = MagicMock()
+        lease.handoff_requested.return_value = True
+        lease.held_seconds = get_config().browser.browser_min_hold_seconds
+        fake_browser = MagicMock()
+        fake_browser.close = AsyncMock(return_value=True)
+
+        with patch.multiple(
+            browser_module,
+            _browser=fake_browser,
+            _browser_cookie_export_path=None,
+            _browser_lease=lease,
+        ):
+            browser_module.note_activity()
+            closed = await browser_module.release_profile_if_idle_or_requested()
+
+        assert closed, (
+            "an owner that held the profile for exactly the hold window kept it, "
+            "so the waiter is told to wait past the window it was promised"
+        )
+        fake_browser.close.assert_awaited_once()
+        lease.release.assert_called_once()
+
 
 class TestTheHandoffAsksTheLeaseTheBrowserHolds:
     """Both handoff questions are about the profile this browser is sitting on.
