@@ -984,6 +984,15 @@ def _on_linkedin(cookie: _Cookie) -> bool:
     return host == "linkedin.com" or host.endswith(".linkedin.com")
 
 
+def _imported_domain(cookie: _Cookie) -> str | bool | int:
+    domain = cookie["domain"]
+    return (
+        ".linkedin.com"
+        if domain in ("www.linkedin.com", ".www.linkedin.com")
+        else domain
+    )
+
+
 def _cookie_key(cookie: _Cookie) -> _CookieKey:
     return cookie["name"], cookie["domain"], cookie["path"]
 
@@ -1085,9 +1094,7 @@ def test_an_import_leaves_one_linkedin_cookie_per_imported_name(
     for source in imported:
         kept = [c for c in after if _on_linkedin(c) and c["name"] == source["name"]]
         assert len(kept) == 1, (source["name"], kept)
-        assert {k: v for k, v in kept[0].items() if k != "domain"} == {
-            k: v for k, v in source.items() if k != "domain"
-        }
+        assert kept[0] == {**source, "domain": _imported_domain(source)}
     assert {_cookie_key(c): c for c in after if not _on_linkedin(c)} == {
         _cookie_key(c): c for c in existing if not _on_linkedin(c)
     }
