@@ -1133,6 +1133,23 @@ class LifetimeSampler:
                 continue
             if root is None:
                 continue
+            try:
+                parent = child.parent()
+                parent_key = None
+                forked = False
+                if parent is not None:
+                    parent_key = (parent.pid, parent.create_time())
+                    known = self._tracked.get(parent_key)
+                    forked = (
+                        known["role"] == "browser-root"
+                        if known is not None
+                        else self._is_root(parent.cmdline()) is True
+                    )
+            except Exception:  # noqa: BLE001 - read again next time
+                continue
+            if forked:
+                self._settled.add(key)
+                continue
             with self._lock:
                 if self.document["ended_ms"] is not None:
                     return
@@ -1140,13 +1157,6 @@ class LifetimeSampler:
             self._track(key, "browser-root", now)
             alive.add(key)
             changed = True
-            try:
-                parent = child.parent()
-                parent_key = None
-                if parent is not None:
-                    parent_key = (parent.pid, parent.create_time())
-            except Exception:  # noqa: BLE001 - the driver stays unidentified
-                parent_key = None
             if parent_key is not None:
                 with self._lock:
                     if self.document["ended_ms"] is not None:

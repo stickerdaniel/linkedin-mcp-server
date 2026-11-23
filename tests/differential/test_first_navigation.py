@@ -20,12 +20,14 @@ import hashlib
 import json
 import math
 import os
+import select
+import signal
 import socket
 import subprocess
 import sys
 import threading
 import time
-from collections.abc import AsyncGenerator, Callable
+from collections.abc import AsyncGenerator, Callable, Generator
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
@@ -579,6 +581,161 @@ async def test_a_relaunch_keeps_the_first_launch_and_reads_its_own_ends(
     )
     assert first in ("after-close-request", "ambiguous")
     assert second == "unexpected"
+
+
+def _like_a_root(arguments: list[str]) -> bool:
+    return any(a.startswith("--user-data-dir=") for a in arguments) and not any(
+        a.startswith("--type=") for a in arguments
+    )
+
+
+@contextlib.contextmanager
+def _forks_of(root: int) -> Generator[Callable[[], object]]:
+    """A wait that returns once *root* forks, or after 10 ms; on a host
+    without kqueue, at once."""
+    if sys.platform != "darwin":
+        yield lambda: None
+        return
+    queue = select.kqueue()
+    try:
+        queue.control(
+            [
+                select.kevent(
+                    root, select.KQ_FILTER_PROC, select.KQ_EV_ADD, select.KQ_NOTE_FORK
+                )
+            ],
+            0,
+        )
+        yield lambda: queue.control(None, 1, 0.01)
+    finally:
+        queue.close()
+
+
+class _ForkHolder:
+    """Stops every process a browser root forks while it still carries the
+    root's command line, and resumes it once the sampler has read the tree
+    ``SAMPLER_READS`` whole times since. ``roots`` is every root it
+    watched, in launch order."""
+
+    def __init__(self, sampler: LifetimeSampler) -> None:
+        self._sampler = sampler
+        self._me = first_navigation._this_process(psutil)
+        self._done = threading.Event()
+        self.roots: list[int] = []
+        self.held: list[int] = []
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._switch = sys.getswitchinterval()
+
+    def __enter__(self) -> _ForkHolder:
+        sys.setswitchinterval(1e-5)
+        self._thread.start()
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        self._done.set()
+        self._thread.join()
+        sys.setswitchinterval(self._switch)
+
+    def _run(self) -> None:
+        while not self._done.is_set():
+            root = self._find_root()
+            if root is None:
+                continue
+            self.roots.append(root)
+            with contextlib.suppress(psutil.Error, OSError):
+                self._watch(psutil.Process(root))
+
+    def _find_root(self) -> int | None:
+        try:
+            children = self._me.children(recursive=True)
+        except (psutil.Error, OSError):
+            return None
+        for child in children:
+            if child.pid in self.roots:
+                continue
+            with contextlib.suppress(psutil.Error):
+                if _like_a_root(child.cmdline()):
+                    return child.pid
+        return None
+
+    def _watch(self, root: psutil.Process) -> None:
+        seen: set[int] = set()
+        with _forks_of(root.pid) as wait:
+            while not self._done.is_set() and not _dead(root):
+                wait()
+                fresh = [p for p in self._children_of(root.pid) if p not in seen]
+                for pid in fresh:
+                    seen.add(pid)
+                    self._hold_if_forked(pid)
+
+    def _children_of(self, pid: int) -> list[int]:
+        if isinstance(self._me, first_navigation._MacDescendants):
+            return self._me._child_pids(pid)
+        return [child.pid for child in psutil.Process(pid).children()]
+
+    def _hold_if_forked(self, pid: int) -> None:
+        try:
+            os.kill(pid, signal.SIGSTOP)
+        except OSError:
+            return
+        try:
+            if self._carries_a_root_line(pid):
+                self.held.append(pid)
+                self._hold()
+        finally:
+            with contextlib.suppress(OSError):
+                os.kill(pid, signal.SIGCONT)
+
+    def _carries_a_root_line(self, pid: int) -> bool:
+        try:
+            return _like_a_root(psutil.Process(pid).cmdline())
+        except psutil.Error:
+            return False
+
+    def _hold(self) -> None:
+        document = self._sampler.document
+        enough = document["samples"] + 1 + SAMPLER_READS
+        while (
+            document["samples"] < enough
+            and document["sampler"] == "running"
+            and not self._done.is_set()
+        ):
+            time.sleep(0.01)
+
+
+_FORK_LAUNCHES = 5
+
+
+@_browser_case
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX stop signals")
+async def test_a_fork_of_the_root_is_not_a_second_root(tmp_path, monkeypatch):
+    """Chromium forks its root to start the crash handler, and the fork keeps
+    the root's command line until it executes. Held there for whole reads of
+    the process tree, it is still not a browser root, and its end is not an
+    unexpected one."""
+    evidence = tmp_path / "evidence"
+    profile = tmp_path / "profile"
+    started = _started_samplers(monkeypatch)
+    with observing(evidence, profile=profile, label="fork"):
+        (sampler,) = started
+        with _ForkHolder(sampler) as holder:
+            for _ in range(_FORK_LAUNCHES):
+                async with _browser(profile) as context:
+                    await context.pages[0].goto("about:blank")
+                    goal = sampler.document["samples"] + 1 + SAMPLER_READS
+                    await _sampled(
+                        sampler,
+                        lambda document: document["samples"] >= goal,
+                        "the sampler did not read the tree",
+                    )
+                if holder.held:
+                    break
+    if not holder.held:
+        pytest.skip("this Chromium forked no process with its root's command line")
+    document = _record(evidence / BROWSER_LIFETIMES_FILE)
+    assert [root["pid"] for root in _roots(document)] == holder.roots
+    assert not [p for p in document["processes"] if p["pid"] in holder.held]
+    assert "unexpected" not in [p["ended"] for p in document["processes"]]
 
 
 # --- Observers that leave ---------------------------------------------------------
