@@ -528,6 +528,17 @@ url_components = st.text(URL_COMPONENT_CHARACTERS, max_size=80) | st.lists(
 
 
 @given(path=capture_paths, query=url_components, fragment=url_components)
+@example(
+    path="/search/results/content/",
+    query="/details/",
+    fragment="/company/acme/people/",
+)
+@example(
+    path="/company/acme/people/",
+    query="/search/results/content/",
+    fragment="/recent-activity/",
+)
+@example(path="/company/acme/posts/", query="/people/", fragment="/search/")
 def test_a_query_or_fragment_never_changes_the_capture_mode(
     path: str, query: str, fragment: str
 ) -> None:
