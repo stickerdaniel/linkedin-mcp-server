@@ -7,6 +7,10 @@ is replaced (``owner_hop``). Fidelity is judged against the owner itself: what a
 client reads through the frontend has to equal what the same client reads from
 the owner directly.
 
+One property sits below the proxy server: it reads a response body through the
+forwarder's own reader and ``httpx2``, cut into any chunks, with a close that
+may fail.
+
 The last class holds the line the forwarder's module docstring draws: no private
 attribute, import or hook of FastMCP or the MCP SDK anywhere in the daemon
 package, beyond the two provider hooks FastMCP documents for overriding. Both
@@ -17,10 +21,12 @@ the first thing a release moves.
 from __future__ import annotations
 
 import ast
+import asyncio
 import base64
 import importlib.util
+import itertools
 import json
-from collections.abc import Iterator
+from collections.abc import AsyncIterator, Iterator
 from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock
@@ -30,6 +36,7 @@ import mcp.types as mt
 import pytest
 from fastmcp import Client, Context, FastMCP
 from fastmcp.tools import ToolResult
+from hypothesis import given, strategies as st
 from owner_hop import Forward, Interceptor, method_of, reach_owners_in_process
 from test_daemon_proxy import _attachment, _backend
 
@@ -510,6 +517,58 @@ class TestHowFarTheRequestGot:
 
         assert record.state is Dispatch.ANSWERED
         assert record.nothing_was_sent is False
+
+
+@given(
+    ident=st.integers(0, 9),
+    cuts=st.lists(st.integers(0, 120), max_size=3),
+    error=st.booleans(),
+    close_fails=st.booleans(),
+    whole=st.booleans(),
+)
+def test_a_complete_body_survives_its_stream_closing(
+    ident: int, cuts: list[int], error: bool, close_fails: bool, whole: bool
+) -> None:
+    from linkedin_mcp_server.daemon.forwarder import (
+        DispatchRecord,
+        _ObservedBody,
+        _Reader,
+        _Wire,
+    )
+
+    answer = (
+        {"error": {"code": -32000, "message": "refused"}}
+        if error
+        else {"result": {"ok": True}}
+    )
+    body = json.dumps({"jsonrpc": "2.0", "id": ident, **answer}).encode()
+    sent = body if whole else body[:-1]
+    edges = [0, *sorted(min(cut, len(sent)) for cut in cuts), len(sent)]
+    chunks = [sent[start:end] for start, end in itertools.pairwise(edges)]
+
+    class Stream(httpx2.AsyncByteStream):
+        async def __aiter__(self) -> AsyncIterator[bytes]:
+            for chunk in chunks:
+                yield chunk
+
+        async def aclose(self) -> None:
+            if close_fails:
+                raise OSError("closing the body failed")
+
+    async def read() -> bytes:
+        wire = _Wire(DispatchRecord())
+        posted = wire.posted(
+            json.dumps({"jsonrpc": "2.0", "id": ident, "method": "tools/call"}).encode()
+        )
+        reader = _Reader(wire, posted, "application/json")
+        response = httpx2.Response(200, stream=_ObservedBody(Stream(), reader))
+        return await response.aread()
+
+    if close_fails and not whole:
+        with pytest.raises(OSError, match="closing the body failed"):
+            asyncio.run(read())
+    else:
+        assert asyncio.run(read()) == sent
 
 
 # --- The line the forwarder's docstring draws -------------------------------
