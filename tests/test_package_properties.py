@@ -4,9 +4,12 @@ from __future__ import annotations
 
 import json
 import os
+import stat
+import string
+import tempfile
 from collections.abc import Callable
 from dataclasses import fields
-from pathlib import PurePosixPath
+from pathlib import Path, PurePosixPath
 from typing import Literal
 from types import ModuleType
 from unittest.mock import patch
@@ -16,7 +19,7 @@ import pytest
 from hypothesis import example, given, strategies as st
 from pydantic import ValidationError
 
-from linkedin_mcp_server import bootstrap, login_app, login_relay
+from linkedin_mcp_server import bootstrap, common_utils, login_app, login_relay
 from linkedin_mcp_server.browser_downgrade import parse_build
 from linkedin_mcp_server.config import loaders
 from linkedin_mcp_server.config.schema import (
@@ -25,7 +28,10 @@ from linkedin_mcp_server.config.schema import (
     ConfigurationError,
 )
 from linkedin_mcp_server.core import proxy_errors
-from linkedin_mcp_server.core.destination import describe_landing
+from linkedin_mcp_server.core.destination import (
+    describe_landing,
+    is_linkedin_landing,
+)
 from linkedin_mcp_server.daemon import config as daemon_config
 from linkedin_mcp_server.daemon import startup
 from linkedin_mcp_server.daemon.descriptor import DaemonDescriptor
@@ -283,6 +289,49 @@ def test_a_described_landing_names_the_origin_and_nothing_behind_it(
         if ":" in named:
             spellings.add(f"{scheme}://[{named}]{port}")
         assert described in spellings
+
+
+host_labels = st.text(
+    string.ascii_lowercase + string.digits, min_size=1, max_size=15
+) | st.sampled_from(("www", "de", "xn--bcher-kva", "xn--lnkedin-9za"))
+other_domains = st.lists(host_labels, min_size=1, max_size=4).map(".".join)
+LOOKALIKE_HOSTS = (
+    "evil-linkedin.com",
+    "linkedin.com.evil.io",
+    "www.linkedin.com.",
+    "WWW.LinkedIn.COM",
+    "l\u0456nkedin.com",
+    "l\u0131nkedin.com",
+    "linkedin\u3002com",
+    "xn--lnkedin-9za.com",
+    "www.linkedin.com..",
+)
+landing_hosts = st.one_of(
+    st.just("linkedin.com"),
+    st.lists(host_labels, min_size=1, max_size=4).map(
+        lambda labels: ".".join(labels) + ".linkedin.com"
+    ),
+    host_labels.map(lambda label: label + "-linkedin.com"),
+    other_domains.map(lambda suffix: "linkedin.com." + suffix),
+    other_domains,
+    st.sampled_from(LOOKALIKE_HOSTS),
+    st.sampled_from(string.ascii_lowercase + string.digits + "-").map(
+        lambda separator: "www.linkedin" + separator + "com"
+    ),
+)
+
+
+@given(host=landing_hosts, uppercase=st.booleans(), trailing_dot=st.booleans())
+@example(host="l\u0131nkedin.com", uppercase=False, trailing_dot=False)
+def test_a_landing_is_linkedins_only_at_a_label_boundary(
+    host: str, uppercase: bool, trailing_dot: bool
+) -> None:
+    host = (host.upper() if uppercase else host) + ("." if trailing_dot else "")
+    labels = host.lower().removesuffix(".").split(".")
+
+    assert is_linkedin_landing(f"https://{host}/feed/") == (
+        labels[-2:] == ["linkedin", "com"]
+    )
 
 
 @st.composite
@@ -660,3 +709,40 @@ def test_a_record_without_a_separator_is_refused_by_one_reader_and_skipped_by_th
     assert [PurePosixPath(record.point) for record in mount_records(text)] == [
         PurePosixPath(os.fsdecode(point)) for point, _, _ in table
     ]
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX directory modes")
+@given(
+    parts=st.lists(
+        st.text(string.ascii_lowercase + string.digits, min_size=1, max_size=12),
+        min_size=1,
+        max_size=5,
+    ),
+    existing=st.integers(0, 5),
+    existing_mode=st.sampled_from((0o755, 0o750, 0o700, 0o770)),
+    umask=st.sampled_from((0o022, 0o077, 0o027)),
+)
+def test_secure_mkdir_makes_every_new_directory_private(
+    parts: list[str], existing: int, existing_mode: int, umask: int
+) -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        root.chmod(0o755)
+        chain = [root.joinpath(*parts[: depth + 1]) for depth in range(len(parts))]
+        for ancestor in chain[:existing]:
+            ancestor.mkdir()
+            ancestor.chmod(existing_mode)
+        before = {
+            path: stat.S_IMODE(path.stat().st_mode)
+            for path in [root, *chain[:existing]]
+        }
+        previous = os.umask(umask)
+        try:
+            common_utils.secure_mkdir(chain[-1])
+        finally:
+            os.umask(previous)
+
+        assert [stat.S_IMODE(path.stat().st_mode) for path in chain[existing:]] == [
+            0o700
+        ] * len(chain[existing:])
+        assert {path: stat.S_IMODE(path.stat().st_mode) for path in before} == before

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import string
 import sys
 import unicodedata
 from urllib.parse import parse_qs, quote, urlparse
@@ -10,6 +11,7 @@ from urllib.parse import parse_qs, quote, urlparse
 import pytest
 from hypothesis import example, given, strategies as st
 
+from linkedin_mcp_server.linkedin.capture import capture_plan_for_url
 from linkedin_mcp_server.linkedin.contracts import (
     FilterValidationError,
     normalize_message_text,
@@ -487,3 +489,54 @@ def test_an_employer_address_is_returned_from_behind_the_interstitial(
 
     assert employer_apply_url(href) == address
     assert employer_apply_url(interstitial.format(quote(unreadable, safe=""))) is None
+
+
+URL_COMPONENT_CHARACTERS = string.ascii_letters + string.digits + "/?:@%-._~!$&()*+,;='"
+ROUTE_TOKENS = (
+    "in",
+    "alice",
+    "company",
+    "people",
+    "details",
+    "experience",
+    "recent-activity",
+    "posts",
+    "search",
+    "results",
+    "content",
+    "jobs",
+    "feed",
+)
+MODE_MARKERS = (
+    "/search/",
+    "/search/results/",
+    "/search/results/content/",
+    "/company/acme/people/",
+    "/people/",
+    "/details/",
+    "/recent-activity/",
+    "/company/acme/posts",
+)
+capture_paths = st.lists(
+    st.sampled_from(ROUTE_TOKENS)
+    | st.text(string.ascii_lowercase + string.digits + "-_", min_size=1, max_size=16),
+    max_size=7,
+).map(lambda parts: "/" + "/".join(parts) + "/")
+url_components = st.text(URL_COMPONENT_CHARACTERS, max_size=80) | st.lists(
+    st.sampled_from(MODE_MARKERS), min_size=1, max_size=4
+).map("".join)
+
+
+@given(path=capture_paths, query=url_components, fragment=url_components)
+def test_a_query_or_fragment_never_changes_the_capture_mode(
+    path: str, query: str, fragment: str
+) -> None:
+    url = "https://www.linkedin.com" + path
+    mode = capture_plan_for_url(url).mode
+
+    for decorated in (
+        f"{url}?{query}",
+        f"{url}#{fragment}",
+        f"{url}?{query}#{fragment}",
+    ):
+        assert capture_plan_for_url(decorated).mode == mode, decorated
