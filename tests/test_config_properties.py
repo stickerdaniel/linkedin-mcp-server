@@ -5,15 +5,21 @@ from __future__ import annotations
 import contextlib
 import io
 import os
-from collections.abc import Callable, Sequence
+import sys
+from collections.abc import Sequence
 from unittest.mock import patch
 
 import pytest
 from hypothesis import example, given, strategies as st
 
 from linkedin_mcp_server import debug_trace, update_check
+from linkedin_mcp_server.browser_import.discovery import SUPPORTED_BROWSERS
 from linkedin_mcp_server.config import loaders
-from linkedin_mcp_server.config.schema import AppConfig, ConfigurationError
+from linkedin_mcp_server.config.schema import (
+    PROXY_SCHEMES,
+    AppConfig,
+    ConfigurationError,
+)
 
 Refused = None
 
@@ -40,7 +46,30 @@ _TEXT = st.text(
 )
 
 
-def _well_formed(parse: Callable[[str], object]) -> st.SearchStrategy[str]:
+_Keys = loaders.EnvironmentKeys
+_SHAPES: dict[str, st.SearchStrategy[str]] = {
+    _Keys.CHROME_PATH: st.just(sys.executable),
+    _Keys.PROXY_SERVER: st.builds(
+        "{}://{}:{}".format,
+        st.sampled_from(sorted(PROXY_SCHEMES)),
+        st.sampled_from(("proxy", "10.0.0.1", "[::1]")),
+        st.integers(0, 70000),
+    ),
+    _Keys.PROXY_USERNAME: st.from_regex(r"[a-z][a-z0-9._-]{0,8}", fullmatch=True),
+    _Keys.PROXY_BYPASS: st.from_regex(r"[a-z]{1,6}(\.[a-z]{2,3})?", fullmatch=True),
+    _Keys.IMPORT_FROM_BROWSER: _spellings(("auto", *SUPPORTED_BROWSERS)),
+}
+# Validation refuses a proxy username or bypass list without a proxy.
+_ALONGSIDE: dict[str, dict[str, str]] = {
+    _Keys.PROXY_USERNAME: {_Keys.PROXY_SERVER: "http://proxy:8080"},
+    _Keys.PROXY_BYPASS: {_Keys.PROXY_SERVER: "http://proxy:8080"},
+}
+
+
+def _well_formed(key: str) -> st.SearchStrategy[str]:
+    parse = WITH_ENV[key].parse
+    if key in _SHAPES:
+        return _SHAPES[key]
     if parse is loaders._flag:
         return _spellings(loaders.TRUTHY_VALUES + loaders.FALSY_VALUES)
     if parse is loaders._log_level:
@@ -55,19 +84,19 @@ def _well_formed(parse: Callable[[str], object]) -> st.SearchStrategy[str]:
         "_finite"
     ):
         return _NUMBERS
-    return st.sampled_from(("chrome", "localhost", "/mcp", "http://proxy:8080"))
+    return st.sampled_from(("localhost", "/mcp", "linkedin"))
 
 
-def _values(parse: Callable[[str], object]) -> st.SearchStrategy[str]:
-    return st.one_of(_well_formed(parse), _TEXT).filter(str.strip)
+def _values(key: str) -> st.SearchStrategy[str]:
+    return st.one_of(_well_formed(key), _TEXT).filter(str.strip)
 
 
 WITH_ENV: dict[str, loaders.Env] = {
     setting.env.key: setting.env for setting in loaders.SETTINGS if setting.env
 }
 # The variable holds the token itself and the option names a file holding it.
-BOTH: dict[str, tuple[loaders.Env, loaders.Option]] = {
-    setting.env.key: (setting.env, setting.cli)
+BOTH: dict[str, loaders.Option] = {
+    setting.env.key: setting.cli
     for setting in loaders.SETTINGS
     if setting.env
     and isinstance(setting.cli, loaders.Option)
@@ -113,8 +142,8 @@ def test_an_accepted_environment_value_decides_its_setting_whatever_came_before(
             return
         value, earlier = "flase", "off"
     else:
-        value = data.draw(_values(env.parse), label="value")
-        earlier = data.draw(_values(env.parse), label="earlier")
+        value = data.draw(_values(key), label="value")
+        earlier = data.draw(_values(key), label="earlier")
     if env.blank == "unset" and not value.strip():
         return
 
@@ -132,11 +161,12 @@ def test_an_accepted_environment_value_decides_its_setting_whatever_came_before(
 def test_the_option_accepts_no_value_its_variable_refuses_and_applies_it_alike(
     key: str, data: st.DataObject | None
 ) -> None:
-    env, option = BOTH[key]
-    value = "0" if data is None else data.draw(_values(env.parse))
+    option = BOTH[key]
+    value = "0" if data is None else data.draw(_values(key))
 
-    through_env = _load({key: value})
-    through_option = _load({}, [f"{option.flag}={value}"])
+    alongside = _ALONGSIDE.get(key, {})
+    through_env = _load({**alongside, key: value})
+    through_option = _load(alongside, [f"{option.flag}={value}"])
 
     if through_env is Refused:
         assert through_option is Refused
@@ -150,19 +180,20 @@ def test_the_option_accepts_no_value_its_variable_refuses_and_applies_it_alike(
 def test_a_given_option_beats_its_variable_even_as_zero(
     key: str, data: st.DataObject | None
 ) -> None:
-    env, option = BOTH[key]
+    option = BOTH[key]
     if data is None:
         from_env, given = "500", "0"
     else:
-        from_env = data.draw(_values(env.parse), label="environment")
-        given = data.draw(_values(env.parse), label="option")
+        from_env = data.draw(_values(key), label="environment")
+        given = data.draw(_values(key), label="option")
     argv = [f"{option.flag}={given}"]
 
-    alone = _load({}, argv)
-    if alone is Refused or _load({key: from_env}) is Refused:
+    alongside = _ALONGSIDE.get(key, {})
+    alone = _load(alongside, argv)
+    if alone is Refused or _load({**alongside, key: from_env}) is Refused:
         return
 
-    assert _load({key: from_env}, argv) == alone
+    assert _load({**alongside, key: from_env}, argv) == alone
 
 
 @pytest.mark.parametrize("key", SWITCHED)
@@ -196,6 +227,7 @@ def test_the_update_check_is_off_exactly_when_startup_read_it_as_off(
     with (
         patch.dict(os.environ, {key: value}),
         patch.object(update_check, "_is_source_install", return_value=False),
+        patch.object(update_check, "__version__", "1.0.0"),
     ):
         os.environ.pop("CI", None)
         skipped = update_check._check_disabled()
