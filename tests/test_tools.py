@@ -3289,8 +3289,9 @@ def test_a_list_argument_reads_the_same_as_its_json_string(
 
     async def check() -> None:
         for tool_name, valid, field in tool_boundary.cells("array"):
-            native = await reach(tool_name, {**valid, field: values})
-            encoded = await reach(tool_name, {**valid, field: json.dumps(values)})
+            encoded_values = json.dumps(values)
+            native = await reach(tool_name, {**valid, field: list(values)})
+            encoded = await reach(tool_name, {**valid, field: encoded_values})
             assert native == encoded, (tool_name, field, values)
 
     asyncio.run(check())
