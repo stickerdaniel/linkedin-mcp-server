@@ -4,13 +4,17 @@ import asyncio
 import contextlib
 import json
 import os
+import re
 import subprocess
 import sys
+import tempfile
 import threading
+from pathlib import Path
 from unittest import mock
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from hypothesis import given, strategies as st
 
 from linkedin_mcp_server.core.browser import BrowserManager
 from linkedin_mcp_server.core.exceptions import NetworkError
@@ -946,6 +950,154 @@ async def test_import_cookies_preserves_existing_cookies(tmp_path):
     # Only the imported names are replaced; nothing wipes the whole jar.
     assert _cleared_names(context) == {"li_at", "JSESSIONID"}
     context.add_cookies.assert_awaited_once()
+
+
+type _Cookie = dict[str, str | bool | int]
+type _CookieKey = tuple[str | bool | int, str | bool | int, str | bool | int]
+
+_IMPORTED_NAMES = ("li_at", "JSESSIONID", "bcookie", "bscookie", "lidc")
+_OTHER_NAMES = ("timezone", "__cf_bm", "theme", "session")
+_LINKEDIN_DOMAINS = (
+    "linkedin.com",
+    ".linkedin.com",
+    "www.linkedin.com",
+    ".www.linkedin.com",
+    "jobs.linkedin.com",
+    ".jobs.linkedin.com",
+    "a.b.linkedin.com",
+    ".a.b.linkedin.com",
+)
+_FOREIGN_DOMAINS = (
+    "example.com",
+    ".example.com",
+    "notlinkedin.com",
+    ".notlinkedin.com",
+    "linkedin.com.evil.test",
+    ".linkedin.com.evil.test",
+    "linkedinXcom",
+    ".linkedinXcom",
+)
+
+
+def _on_linkedin(cookie: _Cookie) -> bool:
+    host = str(cookie["domain"]).removeprefix(".")
+    return host == "linkedin.com" or host.endswith(".linkedin.com")
+
+
+def _imported_domain(cookie: _Cookie) -> str | bool | int:
+    domain = cookie["domain"]
+    return (
+        ".linkedin.com"
+        if domain in ("www.linkedin.com", ".www.linkedin.com")
+        else domain
+    )
+
+
+def _cookie_key(cookie: _Cookie) -> _CookieKey:
+    return cookie["name"], cookie["domain"], cookie["path"]
+
+
+class _CookieJar:
+    def __init__(self, cookies: list[_Cookie]) -> None:
+        self.jar = {_cookie_key(cookie): dict(cookie) for cookie in cookies}
+
+    async def add_cookies(self, cookies: list[_Cookie]) -> None:
+        for cookie in cookies:
+            self.jar[_cookie_key(cookie)] = dict(cookie)
+
+    async def clear_cookies(
+        self,
+        *,
+        name: str | re.Pattern[str] | None = None,
+        domain: str | re.Pattern[str] | None = None,
+        path: str | re.Pattern[str] | None = None,
+    ) -> None:
+        def matches(
+            value: str | bool | int, selector: str | re.Pattern[str] | None
+        ) -> bool:
+            if selector is None:
+                return True
+            if isinstance(selector, re.Pattern):
+                return selector.search(str(value)) is not None
+            return value == selector
+
+        self.jar = {
+            key: cookie
+            for key, cookie in self.jar.items()
+            if not (
+                matches(cookie["name"], name)
+                and matches(cookie["domain"], domain)
+                and matches(cookie["path"], path)
+            )
+        }
+
+
+@st.composite
+def _cookies(
+    draw: st.DrawFn, names: tuple[str, ...], domains: tuple[str, ...], source: str
+) -> _Cookie:
+    return {
+        "name": draw(st.sampled_from(names)),
+        "value": source + draw(st.text(alphabet="abc012", max_size=5)),
+        "domain": draw(st.sampled_from(domains)),
+        "path": draw(st.sampled_from(["/", "/feed/", "/jobs/"])),
+        "expires": -1,
+        "httpOnly": draw(st.booleans()),
+        "secure": draw(st.booleans()),
+        "sameSite": draw(st.sampled_from(["Lax", "Strict"])),
+    }
+
+
+@st.composite
+def _jars_and_imports(draw: st.DrawFn) -> tuple[list[_Cookie], list[_Cookie]]:
+    existing = draw(
+        st.lists(
+            _cookies(
+                _IMPORTED_NAMES + _OTHER_NAMES,
+                _LINKEDIN_DOMAINS + _FOREIGN_DOMAINS,
+                "old:",
+            ),
+            max_size=24,
+            unique_by=_cookie_key,
+        )
+    )
+    imported = [draw(_cookies(("li_at",), _LINKEDIN_DOMAINS, "new:"))]
+    imported += draw(
+        st.lists(
+            _cookies(_IMPORTED_NAMES[1:], _LINKEDIN_DOMAINS, "new:"),
+            max_size=4,
+            unique_by=lambda cookie: cookie["name"],
+        )
+    )
+    return existing, imported
+
+
+@given(case=_jars_and_imports())
+def test_an_import_leaves_one_linkedin_cookie_per_imported_name(
+    case: tuple[list[_Cookie], list[_Cookie]],
+) -> None:
+    existing, imported = case
+    jar = _CookieJar(existing)
+
+    async def import_into_the_jar(root: Path) -> bool:
+        browser = BrowserManager(user_data_dir=root / "profile")
+        cookie_path = root / "cookies.json"
+        cookie_path.write_text(json.dumps(imported))
+        with mock.patch.object(browser, "_context", jar):
+            return await browser.import_cookies(cookie_path, preset_name="auth_minimal")
+
+    with tempfile.TemporaryDirectory() as root:
+        imported_ok = asyncio.run(import_into_the_jar(Path(root)))
+    after = list(jar.jar.values())
+
+    assert imported_ok is True
+    for source in imported:
+        kept = [c for c in after if _on_linkedin(c) and c["name"] == source["name"]]
+        assert len(kept) == 1, (source["name"], kept)
+        assert kept[0] == {**source, "domain": _imported_domain(source)}
+    assert {_cookie_key(c): c for c in after if not _on_linkedin(c)} == {
+        _cookie_key(c): c for c in existing if not _on_linkedin(c)
+    }
 
 
 @pytest.mark.asyncio
