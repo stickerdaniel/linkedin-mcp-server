@@ -1,19 +1,30 @@
 import asyncio
+import json
 import logging
-from typing import Any, Callable, Coroutine, cast
+from collections.abc import Iterator, Mapping
+from dataclasses import dataclass
+from typing import Any, Callable, Coroutine, Literal, NoReturn, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import anyio
+import pydantic
 import pytest
-from fastmcp import FastMCP
+from fastmcp import Context, FastMCP
+from fastmcp.exceptions import ToolError
+from fastmcp.exceptions import ValidationError as FastMCPValidationError
 from fastmcp.tools import FunctionTool
+from hypothesis import given
+from hypothesis import strategies as st
 
 from linkedin_mcp_server.callbacks import MCPContextProgressCallback
+from linkedin_mcp_server.error_handler import CodedToolError, ErrorCode
+from linkedin_mcp_server.linkedin import LinkedInExtractor
 from linkedin_mcp_server.linkedin.contracts import (
     RATE_LIMITED_SECTION_TEXT,
     SEND_INTERRUPTED_WARNING,
 )
 from linkedin_mcp_server.linkedin.contracts import ExtractedSection
+from property_strategies import known_job_addresses, references
 
 
 async def get_tool_fn(
@@ -347,14 +358,18 @@ async def test_valid_input_reaches_the_patched_readiness_call(
     assert ready.await_args.kwargs == {"tool_name": tool_name}
 
 
+_TOOLS_WITHOUT_A_READINESS_CALL = frozenset({"close_session", "get_session_status"})
+
+
 async def test_the_valid_calls_name_every_tool():
-    mcp = FastMCP("test")
-    for module_name in _TOOL_MODULES:
-        _register(mcp, module_name)
+    from linkedin_mcp_server.server import create_mcp_server
 
-    registered = {tool.name for tool in await mcp.list_tools()}
+    registered = {tool.name for tool in await create_mcp_server().list_tools()}
 
-    assert registered == {tool_name for _, tool_name, _ in _A_VALID_CALL}
+    assert _TOOLS_WITHOUT_A_READINESS_CALL <= registered
+    assert registered - _TOOLS_WITHOUT_A_READINESS_CALL == {
+        tool_name for _, tool_name, _ in _A_VALID_CALL
+    }
 
 
 @pytest.mark.parametrize(("module_name", "tool_name", "arguments"), _A_VALID_CALL)
@@ -496,6 +511,45 @@ async def test_no_tool_hands_a_proxy_credential_to_the_client(
     assert "gate.example:7000" in str(excinfo.value)
     assert "s3cr3t" not in str(excinfo.value)
     assert "acctzone9" not in str(excinfo.value)
+
+
+@pytest.mark.parametrize(
+    ("tool_name", "seam", "double"),
+    [
+        ("close_session", "close_browser", AsyncMock),
+        ("get_session_status", "session_status", MagicMock),
+    ],
+)
+async def test_no_session_tool_hands_a_proxy_credential_to_the_client(
+    tool_name, seam, double, monkeypatch
+):
+    from mcp.types import CallToolResult, TextContent
+
+    from linkedin_mcp_server.config.schema import AppConfig
+    from linkedin_mcp_server.server import create_mcp_server
+
+    config = AppConfig()
+    config.browser.proxy_server = "http://gate.example:7000"
+    config.browser.proxy_username = "acctzone9"
+    config.browser.proxy_password = "s3cr3t"
+    monkeypatch.setattr("linkedin_mcp_server.config.get_config", lambda: config)
+    shaped = ToolError("Proxy refused http://acctzone9:s3cr3t@gate.example:7000")
+    mcp = create_mcp_server()
+
+    with patch(f"linkedin_mcp_server.server.{seam}", double(side_effect=shaped)):
+        result = await mcp.call_tool(tool_name, {})
+
+    sent = result.to_mcp_result()
+    assert isinstance(sent, CallToolResult)
+    assert sent.is_error
+    assert sent.structured_content is None
+    text = "".join(
+        block.text for block in sent.content if isinstance(block, TextContent)
+    )
+    assert "gate.example:7000" in text
+    on_the_wire = sent.model_dump_json(by_alias=True)
+    assert "s3cr3t" not in on_the_wire
+    assert "acctzone9" not in on_the_wire
 
 
 async def test_a_search_filter_refusal_does_not_echo_a_proxy_credential(
@@ -3099,3 +3153,145 @@ class TestToolTimeouts:
             tool = await mcp.get_tool(name)
             assert tool is not None
             assert tool.timeout == DEFAULT_TOOL_TIMEOUT_SECONDS
+
+
+class _PageTouched(BaseException):
+    pass
+
+
+class _Tripwire:
+    def __getattr__(self, name: str) -> NoReturn:
+        raise _PageTouched(name)
+
+
+def _declares(schema: dict[str, Any], kind: str) -> bool:
+    return schema.get("type") == kind or any(
+        _declares(part, kind) for part in schema.get("anyOf", [])
+    )
+
+
+def _encodes_as_utf8(value: str) -> bool:
+    try:
+        value.encode()
+    except UnicodeEncodeError:
+        return False
+    return True
+
+
+@dataclass(frozen=True)
+class _Outcome:
+    kind: Literal["page", "input_error", "other_error", "returned"]
+    acquired: int
+    message: str = ""
+
+
+class _ToolBoundary:
+    def __init__(self) -> None:
+        self.mcp = FastMCP("boundary")
+        for module_name in _TOOL_MODULES:
+            _register(self.mcp, module_name)
+        self.extractor = LinkedInExtractor(cast(Any, _Tripwire()))
+        self.acquired = 0
+        self.parameters: dict[str, dict[str, dict[str, Any]]] = {}
+
+    async def load(self) -> None:
+        for tool in await self.mcp.list_tools():
+            self.parameters[tool.name] = tool.parameters.get("properties", {})
+
+    async def ready(self, *args: object, **kwargs: object) -> LinkedInExtractor:
+        self.acquired += 1
+        return self.extractor
+
+    def cells(
+        self, kind: Literal["string", "array"]
+    ) -> Iterator[tuple[str, Mapping[str, object], str]]:
+        for _, tool_name, valid in _A_VALID_CALL:
+            for field, schema in self.parameters[tool_name].items():
+                if _declares(schema, kind) and (
+                    kind == "array" or not _declares(schema, "array")
+                ):
+                    yield tool_name, valid, field
+
+    async def call(self, tool_name: str, arguments: dict[str, object]) -> _Outcome:
+        self.acquired = 0
+        try:
+            await self.mcp.call_tool(tool_name, arguments)
+        except _PageTouched:
+            return _Outcome("page", self.acquired)
+        except (pydantic.ValidationError, FastMCPValidationError):
+            return _Outcome("input_error", self.acquired)
+        except CodedToolError as error:
+            kind = (
+                "input_error"
+                if error.code is ErrorCode.INVALID_ARGUMENT
+                else "other_error"
+            )
+            return _Outcome(kind, self.acquired, str(error))
+        except ToolError as error:
+            return _Outcome("other_error", self.acquired, str(error))
+        return _Outcome("returned", self.acquired)
+
+
+@pytest.fixture(scope="module")
+def tool_boundary() -> Iterator[_ToolBoundary]:
+    boundary = _ToolBoundary()
+    asyncio.run(boundary.load())
+    with pytest.MonkeyPatch.context() as patches:
+        for module_name in _TOOL_MODULES:
+            patches.setattr(
+                f"linkedin_mcp_server.tools.{module_name}.get_ready_extractor",
+                boundary.ready,
+            )
+        patches.setattr(Context, "report_progress", AsyncMock())
+        patches.setattr(logging.getLogger("fastmcp.server.server"), "disabled", True)
+        yield boundary
+
+
+_sendable_references = st.one_of(
+    references, known_job_addresses().map(lambda pair: pair[0])
+).filter(_encodes_as_utf8)
+
+
+@given(reference=_sendable_references)
+def test_bad_input_is_refused_before_the_browser_for_every_tool(
+    tool_boundary: _ToolBoundary, reference: str
+):
+    async def check() -> None:
+        for tool_name, valid, field in tool_boundary.cells("string"):
+            arguments = {**valid, field: reference}
+            if field == "thread_id":
+                arguments.pop("linkedin_username", None)
+            outcome = await tool_boundary.call(tool_name, arguments)
+            if outcome.kind == "input_error":
+                assert outcome.acquired == 0, (tool_name, field, reference, outcome)
+
+    asyncio.run(check())
+
+
+_facet_lists = st.lists(
+    st.one_of(
+        st.sampled_from(("F", "S", "O", "101728296", "101705918")),
+        st.text(max_size=12),
+    ),
+    max_size=5,
+)
+
+
+@given(values=_facet_lists)
+def test_a_list_argument_reads_the_same_as_its_json_string(
+    tool_boundary: _ToolBoundary, values: list[str]
+):
+    async def reach(tool_name: str, arguments: dict[str, object]) -> tuple[object, ...]:
+        search = AsyncMock(side_effect=_PageTouched(tool_name))
+        with patch.object(tool_boundary.extractor, tool_name, search):
+            outcome = await tool_boundary.call(tool_name, arguments)
+        return outcome, search.await_args
+
+    async def check() -> None:
+        for tool_name, valid, field in tool_boundary.cells("array"):
+            encoded_values = json.dumps(values)
+            native = await reach(tool_name, {**valid, field: list(values)})
+            encoded = await reach(tool_name, {**valid, field: encoded_values})
+            assert native == encoded, (tool_name, field, values)
+
+    asyncio.run(check())
