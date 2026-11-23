@@ -17,7 +17,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Check agent attribution and hidden Unicode
-        uses: stickerdaniel/post-no-bills@308298394473ed80000cc5082ae93a1c5bc8563e # v4.1.0
+        uses: stickerdaniel/post-no-bills@98e7cdb959d45d723813ffd55637eb86e55c0555 # v4.1.1
         with:
           model-attribution: host
         # Bind live evidence to this run, not a later branch-tip lookup.
