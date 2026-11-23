@@ -18,7 +18,7 @@ from hypothesis import strategies as st
 
 from linkedin_mcp_server.callbacks import MCPContextProgressCallback
 from linkedin_mcp_server.error_handler import CodedToolError, ErrorCode
-from linkedin_mcp_server.linkedin.extractor import LinkedInExtractor
+from linkedin_mcp_server.linkedin import LinkedInExtractor
 from linkedin_mcp_server.linkedin.contracts import (
     RATE_LIMITED_SECTION_TEXT,
     SEND_INTERRUPTED_WARNING,

@@ -27,6 +27,7 @@ FACADE_PACKAGE_IMPORTERS = {
     Path("tests/linkedin/test_facade_results.py"),
     Path("tests/linkedin/test_facade_structure.py"),
     Path("tests/test_dependencies.py"),
+    Path("tests/test_tools.py"),
 }
 
 PUBLIC_SIGNATURES = {
