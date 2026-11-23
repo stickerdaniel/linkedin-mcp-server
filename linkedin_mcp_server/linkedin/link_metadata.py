@@ -261,7 +261,10 @@ def normalize_url(href: str, _depth: int = 0) -> str | None:
     if not href or href.startswith("#"):
         return None
 
-    parsed = urlparse(href)
+    try:
+        parsed = urlparse(href)
+    except ValueError:
+        return None
     scheme = parsed.scheme.lower()
     if scheme in {"blob", "javascript", "mailto", "tel"}:
         return None

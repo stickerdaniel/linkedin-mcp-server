@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import sys
 import unicodedata
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, quote, urlparse
 
 import pytest
 from hypothesis import example, given, strategies as st
@@ -20,10 +20,16 @@ from linkedin_mcp_server.linkedin.feed_payload import (
 )
 from linkedin_mcp_server.linkedin.identifiers import job_id_from_path
 from linkedin_mcp_server.linkedin.job_policy import (
+    employer_apply_url,
     parse_posting_title,
+    reaches_the_public_internet,
     reconcile_search_references,
 )
-from linkedin_mcp_server.linkedin.link_metadata import Reference
+from linkedin_mcp_server.linkedin.link_metadata import (
+    RawReference,
+    Reference,
+    build_references,
+)
 from linkedin_mcp_server.linkedin.search_urls import (
     build_company_search_url,
     build_content_search_url,
@@ -31,6 +37,7 @@ from linkedin_mcp_server.linkedin.search_urls import (
     build_people_search_url,
 )
 from linkedin_mcp_server.linkedin.text import JOB_SEARCH_EN_US
+from property_strategies import addresses
 
 printable = st.text(st.characters(exclude_categories=("Cs",)), max_size=20)
 optional = st.none() | printable
@@ -415,3 +422,68 @@ def test_feed_references_are_the_rendered_posts_then_anchors_then_captures(
         url.removeprefix("/feed/update/").rstrip("/") for url in rendered[:50]
     ]
     assert all(ref.get("text") == "x" * 240 for ref in references[: len(rendered)])
+
+
+UNREADABLE = ("http://[", "https://[::1", "//[/in/ada/", "http://a]/")
+
+
+@given(
+    unreadable=st.sampled_from(UNREADABLE),
+    others=st.lists(addresses() | st.text(max_size=20), max_size=3),
+)
+def test_an_unreadable_link_costs_only_its_own_reference(
+    unreadable: str, others: list[str]
+) -> None:
+    first: RawReference = {
+        "href": "https://www.linkedin.com/in/ada-lovelace/",
+        "text": "Ada Lovelace",
+    }
+    last: RawReference = {
+        "href": "https://www.linkedin.com/in/grace-hopper/",
+        "text": "Grace Hopper",
+    }
+    between: list[RawReference] = [
+        {"href": href, "text": "Some Label"} for href in (unreadable, *others)
+    ]
+
+    built = build_references([first, *between, last], "about", apply_cap=False)
+    urls = [reference["url"] for reference in built]
+
+    assert urls[0] == "/in/ada-lovelace/"
+    assert "/in/grace-hopper/" in urls
+
+
+@given(href=addresses() | st.text(max_size=30) | st.sampled_from(UNREADABLE))
+def test_an_apply_link_is_an_employer_address_or_none(href: str) -> None:
+    address = employer_apply_url(href)
+    if address is None:
+        return
+    host = urlparse(address).hostname or ""
+
+    assert urlparse(address).scheme in ("http", "https")
+    assert host != "linkedin.com" and not host.endswith(".linkedin.com")
+    assert reaches_the_public_internet(host)
+
+
+employer_addresses = st.builds(
+    "{}://{}/{}{}".format,
+    st.sampled_from(("https", "http")),
+    st.sampled_from(("grnh.se", "jobs.example.com", "boards.greenhouse.io:8443")),
+    st.from_regex(r"[a-z0-9/_-]{0,12}", fullmatch=True),
+    st.sampled_from(("", "?gh_src=abc&utm=1", "#apply")),
+)
+
+
+@given(
+    address=employer_addresses,
+    wrapped=st.booleans(),
+    unreadable=st.sampled_from(UNREADABLE),
+)
+def test_an_employer_address_is_returned_from_behind_the_interstitial(
+    address: str, wrapped: bool, unreadable: str
+) -> None:
+    interstitial = "https://www.linkedin.com/safety/go/?url={}&trk=apply"
+    href = interstitial.format(quote(address, safe="")) if wrapped else address
+
+    assert employer_apply_url(href) == address
+    assert employer_apply_url(interstitial.format(quote(unreadable, safe=""))) is None
