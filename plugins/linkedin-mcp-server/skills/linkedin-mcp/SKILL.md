@@ -27,6 +27,11 @@ work, health checks, or background maintenance.
   thread.
 - `dismiss_job` hides a job from every later search and cannot be undone. Use
   it only for jobs the user asked to dismiss.
+- For a new post, call `prepare_post` and present the exact text, personal
+  author, and Anyone audience for approval. Call `publish_post` only after
+  that approval, with the unchanged preview text and `confirmed=true`.
+  Expired or attempted previews cannot be reused. An unknown publication
+  outcome requires inspection, not a second attempt.
 - Do not retry a failed write action unless the result proves it was not sent.
 
 ## Browser and authentication
@@ -55,7 +60,8 @@ instances, clear profiles, or replace the user's browser session.
 - Messages: `get_inbox`, `get_conversation`, and `search_conversations`.
 - Writes: `send_message`, `reply_to_conversation` (answer an existing thread,
   InMail included), `connect_with_person`, `archive_conversation` and
-  `dismiss_job`, subject to the explicit authorization rules above.
+  `dismiss_job`, plus `publish_post` after preview approval, subject to the
+  explicit authorization rules above.
 - Session: `get_session_status` says whether a login is saved without opening
   a browser or a login window; it does not prove LinkedIn still accepts it.
 - Cleanup: use `close_session` only when the user asks to end the managed

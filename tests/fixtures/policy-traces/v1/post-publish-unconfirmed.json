@@ -1,0 +1,137 @@
+{
+  "call": {
+    "arguments": {
+      "approved_text": "Synthetic post preview.\n\nSecond paragraph.",
+      "confirmed": false,
+      "draft_id": "synthetic-post-preview"
+    },
+    "method": "publish_post"
+  },
+  "events": [
+    {
+      "call": "prepare_post",
+      "kind": "evaluate",
+      "operation": "post_existing_work",
+      "program_digest": "8ecb5ddd64a9",
+      "section": "main_profile"
+    },
+    {
+      "call": "prepare_post",
+      "callback_id": "callback-1",
+      "event": "framenavigated",
+      "kind": "listener.add",
+      "section": "main_profile"
+    },
+    {
+      "call": "prepare_post",
+      "extra": {
+        "target_url": "https://www.linkedin.com/in/me/",
+        "wait_until": "domcontentloaded"
+      },
+      "kind": "boundary.trace",
+      "label": "extractor-before-goto",
+      "section": "main_profile"
+    },
+    {
+      "call": "prepare_post",
+      "kind": "navigate",
+      "landed_url": "https://www.linkedin.com/in/ada-lovelace/",
+      "requested_url": "https://www.linkedin.com/in/me/",
+      "section": "main_profile",
+      "timeout_ms": 30000,
+      "wait_until": "domcontentloaded"
+    },
+    {
+      "call": "prepare_post",
+      "description": "goto https://www.linkedin.com/in/me/",
+      "kind": "boundary.stabilize",
+      "result": null,
+      "section": "main_profile"
+    },
+    {
+      "call": "prepare_post",
+      "extra": {
+        "target_url": "https://www.linkedin.com/in/me/",
+        "wait_until": "domcontentloaded"
+      },
+      "kind": "boundary.trace",
+      "label": "extractor-after-goto",
+      "section": "main_profile"
+    },
+    {
+      "call": "prepare_post",
+      "kind": "boundary.auth_quick",
+      "result": null,
+      "section": "main_profile"
+    },
+    {
+      "call": "prepare_post",
+      "callback_id": "callback-1",
+      "event": "framenavigated",
+      "kind": "listener.remove",
+      "section": "main_profile"
+    },
+    {
+      "call": "prepare_post",
+      "kind": "boundary.rate_limit",
+      "section": "main_profile"
+    },
+    {
+      "call": "prepare_post",
+      "kind": "wait_for_selector",
+      "operation": "main",
+      "section": "main_profile",
+      "selector": "main",
+      "state": "visible",
+      "timeout_ms": null
+    },
+    {
+      "call": "prepare_post",
+      "dismissed": false,
+      "kind": "boundary.modal",
+      "section": "main_profile"
+    },
+    {
+      "actual_scrolls": 0,
+      "call": "prepare_post",
+      "kind": "boundary.scroll_body",
+      "max_scrolls": 0,
+      "pause_time": 0.5,
+      "section": "main_profile"
+    },
+    {
+      "arg": {
+        "selectors": [
+          "main"
+        ]
+      },
+      "call": "prepare_post",
+      "kind": "evaluate",
+      "operation": "root_content",
+      "program_digest": "e6b2be4ebddd",
+      "section": "main_profile"
+    },
+    {
+      "arg": null,
+      "call": "prepare_post",
+      "kind": "wait_for_function",
+      "operation": "profile_message_target_ready",
+      "program_digest": "d156e406f6bb",
+      "section": "main_profile",
+      "timeout_ms": 1000
+    },
+    {
+      "call": "prepare_post",
+      "kind": "evaluate",
+      "operation": "profile_message_target",
+      "program_digest": "c7804bf22e53",
+      "section": "main_profile"
+    }
+  ],
+  "result": {
+    "published": false,
+    "status": "confirmation_required"
+  },
+  "scenario": "publish_post__preview_only",
+  "schema_version": 1
+}
