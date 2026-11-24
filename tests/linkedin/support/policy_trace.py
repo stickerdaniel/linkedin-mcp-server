@@ -189,6 +189,10 @@ class ScriptedLocator:
     async def inner_text(self) -> str:
         return str(await self._operation("inner_text"))
 
+    async def get_attribute(self, name: str) -> str | None:
+        value = await self._operation("get_attribute", attribute=name)
+        return None if value is None else str(value)
+
     async def wait_for(
         self, *, state: str = "visible", timeout: int | None = None
     ) -> None:
@@ -676,6 +680,12 @@ def semantic_program_id(program: str) -> str:
         ("performance.timeOrigin", "document_origin"),
         ("element.ownerDocument.location.href", "owner_document_address"),
         ("MAX_HEADING_CONTAINERS", "root_content"),
+        ("reason: 'existing_dialog'", "post_schedule_preflight"),
+        ("dialog.__linkedinMcpScheduleRead = token", "post_schedule_ui"),
+        (
+            "if (dialog.__linkedinMcpScheduleRead !== token) return false",
+            "post_schedule_cleanup",
+        ),
         ("collectPostBoundaries", "feed_post_boundaries"),
         ("SIDEBAR_SECTIONS", "sidebar_profiles"),
         ("showAllUrls", "sidebar_profiles"),

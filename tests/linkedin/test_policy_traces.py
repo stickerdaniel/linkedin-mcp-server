@@ -159,7 +159,18 @@ async def test_tool_schema_trace_keeps_people_boundary_coercion_and_inventory():
         "tool_schemas"
     ]
 
-    assert len(schemas) == 25
+    assert len(schemas) == 29
+    assert {
+        "get_post",
+        "get_my_posts",
+        "get_post_analytics",
+        "get_scheduled_posts",
+    } <= schemas.keys()
+    assert schemas["get_post"]["input"]["required"] == ["post_url"]
+    assert (
+        schemas["get_scheduled_posts"]["input"]["properties"]["max_scrolls"]["maximum"]
+        == 20
+    )
     network = schemas["search_people"]["input"]["properties"]["network"]
     assert network["anyOf"] == [
         {"items": {"type": "string"}, "type": "array"},
@@ -170,6 +181,45 @@ async def test_tool_schema_trace_keeps_people_boundary_coercion_and_inventory():
         "linkedin_username",
         "message",
         "confirm_send",
+    ]
+
+
+async def test_post_read_traces_keep_raw_text_and_own_profile_resolution():
+    traces = await build_policy_traces()
+    assert traces["get-post.json"]["result"]["sections"] == {"post": "Result content"}
+    assert traces["post-analytics.json"]["result"]["sections"] == {
+        "post_analytics": "Result content"
+    }
+    posts = traces["my-posts.json"]
+    assert posts["result"]["url"] == "https://www.linkedin.com/in/ada-lovelace/"
+    assert posts["result"]["sections"] == {
+        "main_profile": "Own profile",
+        "posts": "Published post content",
+    }
+    navigations = [event for event in posts["events"] if event["kind"] == "navigate"]
+    assert [event["requested_url"] for event in navigations] == [
+        "https://www.linkedin.com/in/me/",
+        "https://www.linkedin.com/in/ada-lovelace/recent-activity/posts/",
+    ]
+
+
+async def test_scheduled_post_trace_orders_read_actions_and_preserves_operator_work():
+    traces = await build_policy_traces()
+    read = traces["scheduled-posts.json"]
+    assert read["result"]["sections"]["scheduled_posts"] == (
+        "Scheduled (1)\nPosting Monday at 9:15 AM\nSynthetic scheduled post."
+    )
+    actions = [
+        event["arg"]["action"]
+        for event in read["events"]
+        if event.get("operation") == "post_schedule_ui"
+    ]
+    assert actions == ["claim", "open_clock", "open_list", "read", "read", "read"]
+    assert read["events"][-1]["operation"] == "post_schedule_cleanup"
+    blocked = traces["scheduled-posts-operator-dialog.json"]
+    assert "existing_dialog" in blocked["result"]["message"]
+    assert [event["operation"] for event in blocked["events"]] == [
+        "post_schedule_preflight"
     ]
 
 

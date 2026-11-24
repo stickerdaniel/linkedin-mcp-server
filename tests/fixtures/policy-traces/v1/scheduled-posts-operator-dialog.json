@@ -1,0 +1,23 @@
+{
+  "call": {
+    "arguments": {
+      "max_scrolls": 3
+    },
+    "method": "get_scheduled_posts"
+  },
+  "events": [
+    {
+      "call": "get_scheduled_posts",
+      "kind": "evaluate",
+      "operation": "post_schedule_preflight",
+      "program_digest": "1e929ec7a6bf",
+      "section": "scheduled_posts"
+    }
+  ],
+  "result": {
+    "message": "Finish or save the open LinkedIn interaction before reading the scheduled queue. (existing_dialog)",
+    "raised": "PostQueueReadRefused"
+  },
+  "scenario": "get_scheduled_posts__operator_dialog",
+  "schema_version": 1
+}

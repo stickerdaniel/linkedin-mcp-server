@@ -1,0 +1,105 @@
+{
+  "call": {
+    "arguments": {
+      "post_url": "urn:li:activity:1234567890123"
+    },
+    "method": "get_post_analytics"
+  },
+  "events": [
+    {
+      "call": "get_post_analytics",
+      "callback_id": "callback-1",
+      "event": "framenavigated",
+      "kind": "listener.add"
+    },
+    {
+      "call": "get_post_analytics",
+      "extra": {
+        "target_url": "https://www.linkedin.com/analytics/post-summary/urn:li:activity:1234567890123/",
+        "wait_until": "domcontentloaded"
+      },
+      "kind": "boundary.trace",
+      "label": "extractor-before-goto"
+    },
+    {
+      "call": "get_post_analytics",
+      "kind": "navigate",
+      "landed_url": "https://www.linkedin.com/analytics/post-summary/urn:li:activity:1234567890123/",
+      "requested_url": "https://www.linkedin.com/analytics/post-summary/urn:li:activity:1234567890123/",
+      "timeout_ms": 30000,
+      "wait_until": "domcontentloaded"
+    },
+    {
+      "call": "get_post_analytics",
+      "description": "goto https://www.linkedin.com/analytics/post-summary/urn:li:activity:1234567890123/",
+      "kind": "boundary.stabilize",
+      "result": null
+    },
+    {
+      "call": "get_post_analytics",
+      "extra": {
+        "target_url": "https://www.linkedin.com/analytics/post-summary/urn:li:activity:1234567890123/",
+        "wait_until": "domcontentloaded"
+      },
+      "kind": "boundary.trace",
+      "label": "extractor-after-goto"
+    },
+    {
+      "call": "get_post_analytics",
+      "kind": "boundary.auth_quick",
+      "result": null
+    },
+    {
+      "call": "get_post_analytics",
+      "callback_id": "callback-1",
+      "event": "framenavigated",
+      "kind": "listener.remove"
+    },
+    {
+      "call": "get_post_analytics",
+      "kind": "boundary.rate_limit"
+    },
+    {
+      "call": "get_post_analytics",
+      "kind": "wait_for_selector",
+      "operation": "main",
+      "selector": "main",
+      "state": "visible",
+      "timeout_ms": null
+    },
+    {
+      "call": "get_post_analytics",
+      "dismissed": false,
+      "kind": "boundary.modal"
+    },
+    {
+      "actual_scrolls": 1,
+      "call": "get_post_analytics",
+      "kind": "boundary.scroll_body",
+      "max_scrolls": 1,
+      "pause_time": 0.5
+    },
+    {
+      "arg": {
+        "selectors": [
+          "main"
+        ]
+      },
+      "call": "get_post_analytics",
+      "kind": "evaluate",
+      "operation": "root_content",
+      "program_digest": "e6b2be4ebddd"
+    }
+  ],
+  "result": {
+    "section_names": [
+      "post_analytics"
+    ],
+    "sections": {
+      "post_analytics": "Result content"
+    },
+    "url": "https://www.linkedin.com/analytics/post-summary/urn:li:activity:1234567890123/"
+  },
+  "scenario": "get_post_analytics__baseline",
+  "schema_version": 1
+}

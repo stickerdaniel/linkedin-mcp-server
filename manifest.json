@@ -141,6 +141,22 @@
       "description": "Search LinkedIn posts/content globally by keyword (the 'Posts' tab) with an optional recency filter (past-24h/past-week/past-month) and content-type filter (e.g. documents); returns unordered candidate permalinks in references"
     },
     {
+      "name": "get_my_posts",
+      "description": "Read the authenticated user's recent posts and rendered engagement text, with bounded scrolling"
+    },
+    {
+      "name": "get_post",
+      "description": "Read one LinkedIn post by permalink or activity URN, including rendered engagement counters and the visible portion of its comment thread"
+    },
+    {
+      "name": "get_post_analytics",
+      "description": "Read the private analytics page for one of your posts using an activity URN or permalink; return rendered metrics without inferring missing values or a score"
+    },
+    {
+      "name": "get_scheduled_posts",
+      "description": "Read the scheduled-post queue through LinkedIn's English scheduling dialog, preserving displayed dates, times, and any time zone"
+    },
+    {
       "name": "get_session_status",
       "description": "Diagnose saved-session files and the serving process's browser state without opening a browser or contacting LinkedIn"
     },

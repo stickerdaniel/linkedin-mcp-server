@@ -51,7 +51,14 @@ instances, clear profiles, or replace the user's browser session.
   `get_job_apply_url` and `get_easy_apply_form`. `get_easy_apply_form` opens
   the Easy Apply form, so use it only when the user is preparing an
   application.
-- Content: `get_feed` and `search_posts`.
+- Content: `get_feed`, `search_posts`, `get_my_posts`, and `get_post`.
+  `get_post` returns only the discussion currently loaded, not a complete
+  comment export. Use `get_post_analytics` for your own posts' private metrics.
+  It requires an activity URN or a permalink identifying that activity.
+  Keep likes distinct from total reactions and missing counts distinct from
+  zero; the tools do not supply an engagement score or ranking.
+- Scheduled posts: `get_scheduled_posts` reads the queue without changing it.
+  Preserve the displayed time zone and report it as unknown when absent.
 - Messages: `get_inbox`, `get_conversation`, and `search_conversations`.
 - Writes: `send_message`, `reply_to_conversation` (answer an existing thread,
   InMail included), `connect_with_person`, `archive_conversation` and

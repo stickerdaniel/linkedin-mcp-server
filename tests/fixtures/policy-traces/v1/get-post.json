@@ -1,0 +1,106 @@
+{
+  "call": {
+    "arguments": {
+      "max_scrolls": 4,
+      "post_url": "urn:li:activity:1234567890123"
+    },
+    "method": "get_post"
+  },
+  "events": [
+    {
+      "call": "get_post",
+      "callback_id": "callback-1",
+      "event": "framenavigated",
+      "kind": "listener.add"
+    },
+    {
+      "call": "get_post",
+      "extra": {
+        "target_url": "https://www.linkedin.com/feed/update/urn:li:activity:1234567890123/",
+        "wait_until": "domcontentloaded"
+      },
+      "kind": "boundary.trace",
+      "label": "extractor-before-goto"
+    },
+    {
+      "call": "get_post",
+      "kind": "navigate",
+      "landed_url": "https://www.linkedin.com/feed/update/urn:li:activity:1234567890123/",
+      "requested_url": "https://www.linkedin.com/feed/update/urn:li:activity:1234567890123/",
+      "timeout_ms": 30000,
+      "wait_until": "domcontentloaded"
+    },
+    {
+      "call": "get_post",
+      "description": "goto https://www.linkedin.com/feed/update/urn:li:activity:1234567890123/",
+      "kind": "boundary.stabilize",
+      "result": null
+    },
+    {
+      "call": "get_post",
+      "extra": {
+        "target_url": "https://www.linkedin.com/feed/update/urn:li:activity:1234567890123/",
+        "wait_until": "domcontentloaded"
+      },
+      "kind": "boundary.trace",
+      "label": "extractor-after-goto"
+    },
+    {
+      "call": "get_post",
+      "kind": "boundary.auth_quick",
+      "result": null
+    },
+    {
+      "call": "get_post",
+      "callback_id": "callback-1",
+      "event": "framenavigated",
+      "kind": "listener.remove"
+    },
+    {
+      "call": "get_post",
+      "kind": "boundary.rate_limit"
+    },
+    {
+      "call": "get_post",
+      "kind": "wait_for_selector",
+      "operation": "main",
+      "selector": "main",
+      "state": "visible",
+      "timeout_ms": null
+    },
+    {
+      "call": "get_post",
+      "dismissed": false,
+      "kind": "boundary.modal"
+    },
+    {
+      "actual_scrolls": 2,
+      "call": "get_post",
+      "kind": "boundary.scroll_body",
+      "max_scrolls": 4,
+      "pause_time": 0.5
+    },
+    {
+      "arg": {
+        "selectors": [
+          "main"
+        ]
+      },
+      "call": "get_post",
+      "kind": "evaluate",
+      "operation": "root_content",
+      "program_digest": "e6b2be4ebddd"
+    }
+  ],
+  "result": {
+    "section_names": [
+      "post"
+    ],
+    "sections": {
+      "post": "Result content"
+    },
+    "url": "https://www.linkedin.com/feed/update/urn:li:activity:1234567890123/"
+  },
+  "scenario": "get_post__baseline",
+  "schema_version": 1
+}

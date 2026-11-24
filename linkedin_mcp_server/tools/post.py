@@ -1,5 +1,5 @@
 """
-LinkedIn post/content search tool.
+Read published posts, owner analytics and scheduled posts, and search content.
 
 Performs LinkedIn's global content search (the "Posts" results tab) using
 innerText extraction, so informal "we're hiring" / "Buscamos ..." posts can
@@ -18,6 +18,11 @@ from linkedin_mcp_server.config.schema import DEFAULT_TOOL_TIMEOUT_SECONDS
 from linkedin_mcp_server.dependencies import get_ready_extractor, tool_errors
 from linkedin_mcp_server.error_handler import CodedToolError, ErrorCode
 from linkedin_mcp_server.linkedin.contracts import FilterValidationError
+from linkedin_mcp_server.linkedin.identifiers import normalize_post_url
+from linkedin_mcp_server.linkedin.post_management import (
+    PostQueueReadRefused,
+    post_analytics_url,
+)
 from linkedin_mcp_server.linkedin.search_urls import build_content_search_url
 
 logger = logging.getLogger(__name__)
@@ -27,6 +32,125 @@ def register_post_tools(
     mcp: FastMCP, *, tool_timeout: float = DEFAULT_TOOL_TIMEOUT_SECONDS
 ) -> None:
     """Register post/content-search tools with the MCP server."""
+
+    @mcp.tool(
+        timeout=tool_timeout,
+        title="Get Post",
+        annotations={"readOnlyHint": True, "openWorldHint": True},
+        tags={"post"},
+    )
+    @tool_errors
+    async def get_post(
+        post_url: str,
+        ctx: Context,
+        max_scrolls: Annotated[int, Field(ge=0, le=50)] = 3,
+    ) -> dict[str, Any]:
+        """Read one post's text, visible comments and engagement counters.
+
+        post_url accepts a LinkedIn /feed/update/ or /posts/ permalink, including
+        a relative reference returned by this server, or a complete activity,
+        share or ugcPost URN. max_scrolls bounds page scrolling (0–50).
+
+        Returns {url, sections: {post: raw_text}} with optional references and
+        section_errors. Parse reactions, comments and repost counts only when
+        the page displays them; a missing count is not zero. Collapsed replies,
+        reaction lists and truncated text are not expanded. A bounded read is
+        not a complete comment export. No likes, replies or reposts are sent.
+        """
+        post_url = normalize_post_url(post_url)
+        extractor = await get_ready_extractor(ctx, tool_name="get_post")
+        await ctx.report_progress(progress=0, total=100, message="Reading the post")
+        result = await extractor.get_post(post_url, max_scrolls=max_scrolls)
+        await ctx.report_progress(progress=100, total=100, message="Complete")
+        return result
+
+    @mcp.tool(
+        timeout=tool_timeout,
+        title="Get My Posts",
+        annotations={"readOnlyHint": True, "openWorldHint": True},
+        tags={"post", "person"},
+    )
+    @tool_errors
+    async def get_my_posts(
+        ctx: Context,
+        max_scrolls: Annotated[int, Field(ge=0, le=50)] = 5,
+    ) -> dict[str, Any]:
+        """Read the authenticated user's published posts and visible counters.
+
+        Returns {url, sections: {main_profile: raw_text, posts: raw_text}} through
+        the own-profile reader, with optional references and section_errors.
+        The posts section is LinkedIn's rendered activity page. max_scrolls (0–50) limits
+        loading; the result is a sample rather than the complete post history.
+        Open individual permalinks with get_post for their visible discussion,
+        or get_post_analytics for any owner-only metrics LinkedIn makes available.
+        """
+        extractor = await get_ready_extractor(ctx, tool_name="get_my_posts")
+        await ctx.report_progress(progress=0, total=100, message="Reading your posts")
+        result = await extractor.get_my_posts(max_scrolls=max_scrolls)
+        await ctx.report_progress(progress=100, total=100, message="Complete")
+        return result
+
+    @mcp.tool(
+        timeout=tool_timeout,
+        title="Get Post Analytics",
+        annotations={"readOnlyHint": True, "openWorldHint": True},
+        tags={"post", "analytics"},
+    )
+    @tool_errors
+    async def get_post_analytics(post_url: str, ctx: Context) -> dict[str, Any]:
+        """Read the analytics page LinkedIn exposes for a post you own.
+
+        Accepts an activity permalink or complete urn:li:activity:<id>. Returns raw
+        analytics text, which may include impressions, reach and engagement.
+        Availability depends on the account, post and current LinkedIn page.
+        Missing or restricted metrics are not zero. This tool provides no
+        universal ranking score and does not compare posts automatically.
+        """
+        post_url = normalize_post_url(post_url)
+        post_analytics_url(post_url)
+        extractor = await get_ready_extractor(ctx, tool_name="get_post_analytics")
+        await ctx.report_progress(
+            progress=0, total=100, message="Reading post analytics"
+        )
+        result = await extractor.get_post_analytics(post_url)
+        await ctx.report_progress(progress=100, total=100, message="Complete")
+        return result
+
+    @mcp.tool(
+        timeout=tool_timeout,
+        title="Get Scheduled Posts",
+        annotations={"readOnlyHint": True, "openWorldHint": True},
+        tags={"post"},
+    )
+    @tool_errors
+    async def get_scheduled_posts(
+        ctx: Context,
+        max_scrolls: Annotated[int, Field(ge=0, le=20)] = 3,
+    ) -> dict[str, Any]:
+        """Read the authenticated user's scheduled posts without changing them.
+
+        max_scrolls (0–20) bounds loading of the rendered schedule. The response
+        retains LinkedIn's displayed post text, dates and times; it does not
+        assume a timezone the page does not state. An unavailable schedule is
+        reported as an error, not as evidence that no posts are scheduled.
+        The current workflow supports the English composer only.
+        This tool does not edit, delete, reschedule or publish a scheduled post.
+        """
+        extractor = await get_ready_extractor(ctx, tool_name="get_scheduled_posts")
+        await ctx.report_progress(
+            progress=0, total=100, message="Reading scheduled posts"
+        )
+        try:
+            result = await extractor.get_scheduled_posts(max_scrolls=max_scrolls)
+        except PostQueueReadRefused as exc:
+            code = (
+                ErrorCode.BROWSER_BUSY
+                if exc.operator_work
+                else ErrorCode.PAGE_UNREADABLE
+            )
+            raise CodedToolError(str(exc), code) from exc
+        await ctx.report_progress(progress=100, total=100, message="Complete")
+        return result
 
     @mcp.tool(
         timeout=tool_timeout,
