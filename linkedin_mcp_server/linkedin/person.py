@@ -482,6 +482,7 @@ class PersonReader:
         network: list[str] | None = None,
         current_company: str | None = None,
         connection_of: str | None = None,
+        page: int | None = None,
     ) -> dict[str, Any]:
         """Search for people and extract the results page.
 
@@ -523,6 +524,7 @@ class PersonReader:
             network=network,
             current_company=current_company,
             connection_of=connection_of,
+            page=page,
         )
         extracted = await self._capture.capture(
             url,

@@ -1916,6 +1916,19 @@ class TestSearchPeople:
 
         assert "currentCompany=%5B%221115%22%5D" in result["url"]
 
+    async def test_search_people_navigates_to_the_requested_page(self, mock_page):
+        reader = _reader(mock_page)
+        with patch.object(
+            reader._capture,
+            "capture",
+            new_callable=AsyncMock,
+            return_value=extracted("Jane Doe"),
+        ) as capture:
+            result = await reader.search_people("engineer", page=2)
+
+        assert capture.call_args.args[0].endswith("&page=2")
+        assert result["url"].endswith("&page=2")
+
     async def test_search_people_invalid_network_token_raises(self, mock_page):
         reader = _reader(mock_page)
         with pytest.raises(ValueError, match="Invalid network token"):

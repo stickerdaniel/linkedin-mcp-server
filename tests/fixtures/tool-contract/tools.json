@@ -1039,6 +1039,19 @@
           ],
           "default": null,
           "description": "Optional connection-degree filter. Each element is one of\n\"F\" (1st-degree), \"S\" (2nd-degree), \"O\" (3rd-degree and beyond).\nExample: [\"F\"] to only return 1st-degree connections. A single\ntoken (\"F\") or a comma-separated string (\"F,S\") is also\naccepted, for clients that cannot transmit an array."
+        },
+        "page": {
+          "anyOf": [
+            {
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional results page, 1-based. Omitted, LinkedIn returns\nthe first page. Call again with page=2, 3, ... to read further\nresults with the same filters."
         }
       },
       "required": [

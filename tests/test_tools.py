@@ -893,6 +893,7 @@ class TestPersonTool:
             network=None,
             current_company=None,
             connection_of=None,
+            page=None,
         )
 
     async def test_search_people_with_network_and_company_filters(
@@ -930,6 +931,7 @@ class TestPersonTool:
             network=["F"],
             current_company="1115",
             connection_of=None,
+            page=None,
         )
 
     async def test_search_people_with_connection_of_filter(
@@ -964,6 +966,7 @@ class TestPersonTool:
             network=["F"],
             current_company=None,
             connection_of="ACoAADdZSNYBiaacxEw6je-wVIKjGkKp-it0gD8",
+            page=None,
         )
 
     @pytest.mark.parametrize(
@@ -1027,7 +1030,65 @@ class TestPersonTool:
             network=["F"],
             current_company=None,
             connection_of=None,
+            page=None,
         )
+
+    async def test_search_people_forwards_page(self, monkeypatch):
+        import linkedin_mcp_server.tools.person as person_module
+        from linkedin_mcp_server.tools.person import register_person_tools
+
+        mock_extractor = _make_mock_extractor(
+            {
+                "url": (
+                    "https://www.linkedin.com/search/results/people/"
+                    "?keywords=engineer&page=2"
+                ),
+                "sections": {"search_results": "Jane Doe"},
+            }
+        )
+
+        async def _fake_get_ready_extractor(ctx, tool_name):
+            return mock_extractor
+
+        monkeypatch.setattr(
+            person_module, "get_ready_extractor", _fake_get_ready_extractor
+        )
+
+        mcp = FastMCP("test")
+        register_person_tools(mcp)
+
+        await mcp.call_tool("search_people", {"keywords": "engineer", "page": 2})
+
+        mock_extractor.search_people.assert_awaited_once_with(
+            "engineer",
+            None,
+            network=None,
+            current_company=None,
+            connection_of=None,
+            page=2,
+        )
+
+    @pytest.mark.parametrize("page", [0, -1])
+    async def test_search_people_refuses_a_page_below_one(self, monkeypatch, page):
+        import linkedin_mcp_server.tools.person as person_module
+        from linkedin_mcp_server.tools.person import register_person_tools
+
+        mock_extractor = _make_mock_extractor({"url": "", "sections": {}})
+
+        async def _fake_get_ready_extractor(ctx, tool_name):
+            return mock_extractor
+
+        monkeypatch.setattr(
+            person_module, "get_ready_extractor", _fake_get_ready_extractor
+        )
+
+        mcp = FastMCP("test")
+        register_person_tools(mcp)
+
+        with pytest.raises(Exception, match="greater than or equal to 1"):
+            await mcp.call_tool("search_people", {"keywords": "engineer", "page": page})
+
+        mock_extractor.search_people.assert_not_awaited()
 
     async def test_search_people_validation_error_surfaced_as_tool_error(
         self, mock_context, serve_extractor

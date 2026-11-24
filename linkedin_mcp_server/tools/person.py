@@ -141,6 +141,7 @@ def register_person_tools(
         network: StrList | None = None,
         current_company: str | None = None,
         connection_of: str | None = None,
+        page: Annotated[int, Field(ge=1)] | None = None,
     ) -> dict[str, Any]:
         """
         Search for people on LinkedIn.
@@ -176,6 +177,9 @@ def register_person_tools(
                 drops the filter, without saying so, when the member is
                 3rd-degree or beyond (you share no connections): the result
                 is then your unfiltered network, not an empty list.
+            page: Optional results page, 1-based. Omitted, LinkedIn returns
+                the first page. Call again with page=2, 3, ... to read further
+                results with the same filters.
 
         Returns:
             Dict with url, sections (name -> raw text), and optional references.
@@ -198,12 +202,13 @@ def register_person_tools(
         extractor = await get_ready_extractor(ctx, tool_name="search_people")
         logger.info(
             "Searching people: keywords='%s', location='%s', network=%s, "
-            "current_company='%s', connection_of='%s'",
+            "current_company='%s', connection_of='%s', page=%s",
             keywords,
             location,
             network,
             current_company,
             connection_of,
+            page,
         )
 
         await ctx.report_progress(
@@ -217,6 +222,7 @@ def register_person_tools(
                 network=network,
                 current_company=current_company,
                 connection_of=connection_of,
+                page=page,
             )
         except FilterValidationError as e:
             # Validation messages carry actionable detail; surface

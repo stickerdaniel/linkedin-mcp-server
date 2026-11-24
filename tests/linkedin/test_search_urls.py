@@ -422,9 +422,10 @@ class TestBuildPeopleSearchUrl:
             location="103644278",
             network=["F"],
             current_company="1115",
+            page=2,
         ) == (
             f"{PEOPLE}keywords=engineer&geoUrn=%5B%22103644278%22%5D"
-            "&network=%5B%22F%22%5D&currentCompany=%5B%221115%22%5D"
+            "&network=%5B%22F%22%5D&currentCompany=%5B%221115%22%5D&page=2"
         )
 
     @pytest.mark.parametrize("keywords,encoded", ENCODED_KEYWORDS)
@@ -476,6 +477,16 @@ class TestBuildPeopleSearchUrl:
 
     def test_absent_network_is_omitted(self):
         assert build_people_search_url("engineer", network=None) == (
+            f"{PEOPLE}keywords=engineer"
+        )
+
+    def test_page_is_appended_after_every_filter(self):
+        assert build_people_search_url("engineer", page=3) == (
+            f"{PEOPLE}keywords=engineer&page=3"
+        )
+
+    def test_absent_page_is_omitted(self):
+        assert build_people_search_url("engineer", page=None) == (
             f"{PEOPLE}keywords=engineer"
         )
 

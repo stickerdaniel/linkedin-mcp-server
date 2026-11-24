@@ -153,6 +153,7 @@ def build_people_search_url(
     network: list[str] | None = None,
     current_company: str | None = None,
     connection_of: str | None = None,
+    page: int | None = None,
 ) -> str:
     """Build a LinkedIn people search URL, refusing filters LinkedIn ignores.
 
@@ -214,6 +215,8 @@ def build_people_search_url(
         params += f"&currentCompany={_encode_list_facet([current_company])}"
     if connection_of_id:
         params += f"&connectionOf={_encode_list_facet([connection_of_id])}"
+    if page is not None:
+        params += f"&page={page}"
 
     return f"https://www.linkedin.com/search/results/people/?{params}"
 
