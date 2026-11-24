@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from typing import Any
 from unittest.mock import AsyncMock
 
+import anyio
 import pytest
 from patchright.async_api import async_playwright
 
@@ -470,6 +471,24 @@ async def test_media_added_after_the_clock_is_never_discarded(
     assert await dom_page.evaluate("document.body.dataset.clockClicks") == "1"
     assert await dom_page.evaluate("document.body.dataset.listClicks") is None
     assert await dom_page.evaluate("document.body.dataset.dismissals") is None
+
+
+async def test_deadline_during_cleanup_closes_the_dialog_and_times_out(
+    dom_page, workflow, monkeypatch
+):
+    run_on_linkedin = PageSession.run_on_linkedin
+
+    async def expire_during_close(session, script, *args):
+        if script == post_management.CLOSE_EMPTY_DIALOG_JS:
+            tool_timeout.deadline = anyio.current_time()
+        return await run_on_linkedin(session, script, *args)
+
+    monkeypatch.setattr(PageSession, "run_on_linkedin", expire_during_close)
+
+    with pytest.raises(TimeoutError), anyio.fail_after(None) as tool_timeout:
+        await workflow.reader.get_scheduled_posts()
+
+    assert await dom_page.evaluate("document.body.dataset.dismissals") == "1"
 
 
 @pytest.mark.parametrize("variant", ["one", "new-draft"])

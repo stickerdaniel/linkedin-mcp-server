@@ -357,7 +357,6 @@ class PostManagement:
                         else "The scheduled list did not render entries or an explicit empty state within the read budget.",
                     }
                 }
-            return result
         finally:
             if opened:
                 # Bounded cleanup also runs when the tool timeout cancels this
@@ -372,6 +371,9 @@ class PostManagement:
                         logger.warning(
                             "Could not close the scheduled-post dialog", exc_info=True
                         )
+        # Deliver any deadline deferred by the cleanup shield before returning.
+        await anyio.lowlevel.checkpoint()
+        return result
 
     async def _step(self, action: str, token: str) -> dict[str, Any]:
         deadline = self._session.monotonic() + 5
