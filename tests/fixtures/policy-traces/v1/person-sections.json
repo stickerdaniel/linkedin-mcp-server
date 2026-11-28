@@ -1091,6 +1091,72 @@
       "locator": "show_more.filtered"
     },
     {
+      "call": "read_person",
+      "kind": "mouse.move",
+      "x": 640,
+      "y": 360
+    },
+    {
+      "call": "read_person",
+      "kind": "evaluate",
+      "operation": "wheel_load_text_length",
+      "program_digest": "095957826b5e"
+    },
+    {
+      "call": "read_person",
+      "delta_x": 0,
+      "delta_y": 2000,
+      "kind": "mouse.wheel"
+    },
+    {
+      "call": "read_person",
+      "kind": "sleep",
+      "reason": "sleep",
+      "seconds": 1.5
+    },
+    {
+      "call": "read_person",
+      "kind": "evaluate",
+      "operation": "wheel_load_text_length",
+      "program_digest": "095957826b5e"
+    },
+    {
+      "call": "read_person",
+      "delta_x": 0,
+      "delta_y": 2000,
+      "kind": "mouse.wheel"
+    },
+    {
+      "call": "read_person",
+      "kind": "sleep",
+      "reason": "sleep",
+      "seconds": 1.5
+    },
+    {
+      "call": "read_person",
+      "kind": "evaluate",
+      "operation": "wheel_load_text_length",
+      "program_digest": "095957826b5e"
+    },
+    {
+      "call": "read_person",
+      "delta_x": 0,
+      "delta_y": 2000,
+      "kind": "mouse.wheel"
+    },
+    {
+      "call": "read_person",
+      "kind": "sleep",
+      "reason": "sleep",
+      "seconds": 1.5
+    },
+    {
+      "call": "read_person",
+      "kind": "evaluate",
+      "operation": "wheel_load_text_length",
+      "program_digest": "095957826b5e"
+    },
+    {
       "actual_scrolls": 2,
       "call": "read_person",
       "kind": "boundary.scroll_body",

@@ -91,6 +91,19 @@ def rate_limited_section_error() -> dict[str, str]:
     }
 
 
+def list_incomplete_section_error(reason: str) -> dict[str, str]:
+    """The ``section_errors`` entry for a list read before it showed its end.
+
+    The text that loaded is kept beside it, as for a job posting without its
+    description: a caller that sees a full-looking list with no error would
+    take it as the whole list.
+    """
+    return {
+        "error_type": "list_incomplete",
+        "error_message": f"{reason.strip()} The text was kept but may be incomplete.",
+    }
+
+
 class _Omitted:
     """A result field the caller did not pass."""
 

@@ -26,6 +26,7 @@ from linkedin_mcp_server.linkedin.content import PageContentReader
 from linkedin_mcp_server.linkedin.contracts import (
     RATE_LIMITED_SECTION_TEXT,
     ExtractedSection,
+    list_incomplete_section_error,
 )
 from linkedin_mcp_server.linkedin.link_metadata import Reference
 from linkedin_mcp_server.linkedin.navigation import PageNavigator
@@ -230,6 +231,30 @@ class TestReadPersonUrls:
             result["section_errors"]["posts"]["issue_template_path"] == "/tmp/issue.md"
         )
 
+    async def test_read_person_keeps_text_and_error_of_a_partial_list(self, mock_page):
+        """A list cut off while loading returns its text and a warning (#590)."""
+        reader = _reader(mock_page)
+        warning = list_incomplete_section_error("Cut off.")
+        with (
+            patch.object(
+                reader._capture,
+                "capture",
+                new_callable=AsyncMock,
+                side_effect=[
+                    extracted("profile text"),
+                    extracted("Skills\nPython", error=warning),
+                ],
+            ),
+            patch(
+                "linkedin_mcp_server.linkedin.session.asyncio.sleep",
+                new_callable=AsyncMock,
+            ),
+        ):
+            result = await reader.read_person("testuser", {"skills"})
+
+        assert result["sections"]["skills"] == "Skills\nPython"
+        assert result["section_errors"] == {"skills": warning}
+
     async def test_experience_education_visits_correct_urls(self, mock_page):
         reader = _reader(mock_page)
         with (
@@ -306,7 +331,13 @@ class TestReadPersonUrls:
         assert [
             capture_call.kwargs["plan"].mode
             for capture_call in mock_extract.call_args_list
-        ] == [CaptureMode.STANDARD, *([CaptureMode.DETAILS] * 9), CaptureMode.ACTIVITY]
+        ] == [
+            CaptureMode.STANDARD,
+            *([CaptureMode.DETAILS] * 7),
+            CaptureMode.DETAILS | CaptureMode.WHEEL_LOAD,  # skills, issue #590
+            CaptureMode.DETAILS,
+            CaptureMode.ACTIVITY,
+        ]
         assert mock_overlay.call_args.kwargs["plan"].mode is CaptureMode.OVERLAY
         # Verify each expected suffix was navigated
         assert any(u.endswith("/in/testuser/") for u in all_urls)

@@ -676,6 +676,7 @@ def semantic_program_id(program: str) -> str:
         ("performance.timeOrigin", "document_origin"),
         ("element.ownerDocument.location.href", "owner_document_address"),
         ("MAX_HEADING_CONTAINERS", "root_content"),
+        ("wheelLoadMain", "wheel_load_text_length"),
         ("collectPostBoundaries", "feed_post_boundaries"),
         ("SIDEBAR_SECTIONS", "sidebar_profiles"),
         ("showAllUrls", "sidebar_profiles"),

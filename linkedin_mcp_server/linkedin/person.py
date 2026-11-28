@@ -284,6 +284,10 @@ class PersonReader:
                         sections[section_name] = extracted.text
                         if extracted.references:
                             references[section_name] = extracted.references
+                        # Text with an error is a partial read (a list still
+                        # loading): keep both, so the caller can tell.
+                        if extracted.error:
+                            section_errors[section_name] = extracted.error
                     elif extracted.text == RATE_LIMITED_SECTION_TEXT:
                         section_errors[section_name] = rate_limited_section_error()
                         # Stop rather than walk the remaining sections. Each one

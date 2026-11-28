@@ -46,7 +46,8 @@ _PERSON_SECTION_MODES = {
     "volunteering": CaptureMode.DETAILS,
     "languages": CaptureMode.DETAILS,
     "certifications": CaptureMode.DETAILS,
-    "skills": CaptureMode.DETAILS,
+    # The skills list loads only on a real wheel event (issue #590).
+    "skills": CaptureMode.DETAILS | CaptureMode.WHEEL_LOAD,
     "projects": CaptureMode.DETAILS,
     "contact_info": CaptureMode.OVERLAY,
     "posts": CaptureMode.ACTIVITY,

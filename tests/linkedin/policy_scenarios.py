@@ -300,6 +300,8 @@ async def _person_sections_scenario() -> dict[str, Any]:
         for section in PERSON_SECTIONS
     ]
     page.script("evaluate:root_content", *roots)
+    # skills wheel-loads (issue #590): a list that never grows stops after 3 tries
+    page.script("evaluate:wheel_load_text_length", 100, 100, 100, 100)
     _script_profile_target(page)
     page.declare_locator("main button", "show_more")
     page.declare_derived(
