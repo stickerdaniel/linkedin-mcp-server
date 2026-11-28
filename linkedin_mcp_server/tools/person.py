@@ -87,16 +87,21 @@ def register_person_tools(
                 Default (None) reads only the main profile page.
             max_scrolls: Maximum pagination attempts per section to load more content.
                 On detail sections (experience, certifications, skills, etc.) this
-                is the max number of "Show more" button clicks. On activity/posts
+                is the max number of "Show more" button clicks. On skills it also
+                caps the mouse-wheel rounds that load the list. On activity/posts
                 it is the max scroll-to-bottom iterations. Applies to all sections
-                in this call. Default (None) uses 5 for detail sections and 10 for
-                posts. Increase when a profile has many items in a section
-                (e.g., 30+ certifications, max_scrolls=20). To avoid slowing down
-                other sections, request heavy sections in a separate call.
+                in this call. Default (None) uses 5 for detail sections, 40 wheel
+                rounds for skills and 10 for posts. Increase when a profile has
+                many items in a section (e.g., 30+ certifications,
+                max_scrolls=20). To avoid slowing down other sections, request
+                heavy sections in a separate call.
 
         Returns:
             Dict with url, sections (name -> raw text), and optional references and section_errors.
             Sections may be absent if extraction yielded no content for that page.
+            section_errors.skills.error_type "list_incomplete" means the skills
+            list was still loading when max_scrolls ran out. The text is kept but
+            may be incomplete; a higher max_scrolls may return more.
             contact_info is read only from an accepted contact-overlay root. If no such root
             is found, the section is omitted and section_errors explains the failure;
             underlying profile text and links are never substituted. Existing suspected
@@ -373,6 +378,9 @@ def register_person_tools(
             Dict with url, sections (name -> raw text), and optional references and section_errors.
             The url field reflects the resolved profile URL, revealing the real username.
             Sections may be absent if extraction yielded no content for that page.
+            section_errors.skills.error_type "list_incomplete" means the skills
+            list was still loading when max_scrolls ran out. The text is kept but
+            may be incomplete; a higher max_scrolls may return more.
             contact_info is read only from an accepted contact-overlay root. If no such root
             is found, the section is omitted and section_errors explains the failure;
             underlying profile text and links are never substituted. Existing suspected

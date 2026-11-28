@@ -523,7 +523,7 @@
                 }
               ],
               "default": null,
-              "description": "Maximum pagination attempts per section to load more content.\nOn detail sections (experience, certifications, skills, etc.) this\nis the max number of \"Show more\" button clicks. On activity/posts\nit is the max scroll-to-bottom iterations. Applies to all sections\nin this call. Default (None) uses 5 for detail sections and 10 for\nposts. Increase when a profile has many items in a section\n(e.g., 30+ certifications, max_scrolls=20). To avoid slowing down\nother sections, request heavy sections in a separate call."
+              "description": "Maximum pagination attempts per section to load more content.\nOn detail sections (experience, certifications, skills, etc.) this\nis the max number of \"Show more\" button clicks. On skills it also\ncaps the mouse-wheel rounds that load the list. On activity/posts\nit is the max scroll-to-bottom iterations. Applies to all sections\nin this call. Default (None) uses 5 for detail sections, 40 wheel\nrounds for skills and 10 for posts. Increase when a profile has\nmany items in a section (e.g., 30+ certifications,\nmax_scrolls=20). To avoid slowing down other sections, request\nheavy sections in a separate call."
             },
             "sections": {
               "anyOf": [

@@ -27,6 +27,7 @@ from linkedin_mcp_server.core.exceptions import (
 from linkedin_mcp_server.error_diagnostics import build_issue_diagnostics
 from linkedin_mcp_server.linkedin.content import PageContentReader
 from linkedin_mcp_server.linkedin.contracts import (
+    list_incomplete_section_error,
     RATE_LIMITED_SECTION_TEXT,
     ExtractedSection,
 )
@@ -457,8 +458,9 @@ class SectionCapture:
         # Some lists (the skills details page, issue #590) have no "Show more"
         # pager and ignore window.scrollTo: they append the next batch only on a
         # real wheel event over the page.
+        wheel_cut_off_at: int | None = None
         if CaptureMode.WHEEL_LOAD in plan.mode:
-            await self._wheel_load(plan.max_scrolls)
+            wheel_cut_off_at = await self._wheel_load(plan.max_scrolls)
 
         # A posting renders its header, apply controls and company boilerplate
         # before the description panel, so a page read once `<main>` exists
@@ -499,14 +501,23 @@ class SectionCapture:
             references = append_permalink_references(
                 references, captured, context=section_name
             )
+        if wheel_cut_off_at is not None:
+            return ExtractedSection(
+                text=cleaned,
+                references=references,
+                error=list_incomplete_section_error(wheel_cut_off_at),
+            )
         return ExtractedSection(text=cleaned, references=references)
 
-    async def _wheel_load(self, max_scrolls: int | None) -> None:
+    async def _wheel_load(self, max_scrolls: int | None) -> int | None:
         """Wheel over the page until the text in ``<main>`` stops growing.
 
         Wheels at the viewport centre, as the feed does. It stops after
         ``_WHEEL_LOAD_MAX_STALE`` rounds in a row without growth, or after
         ``max_scrolls`` rounds (``_WHEEL_LOAD_MAX_ROUNDS`` when unset).
+
+        Returns None once the list stopped growing, or the number of rounds
+        spent when the ceiling cut it off while it was still growing.
         """
         page = self._session.page
         viewport = page.viewport_size or {"width": 1280, "height": 720}
@@ -524,8 +535,9 @@ class SectionCapture:
             stale += 1
             if stale >= _WHEEL_LOAD_MAX_STALE:
                 logger.debug("Wheel load stopped growing after %d rounds", i + 1)
-                return
-        logger.debug("Wheel load hit its ceiling of %d rounds", rounds)
+                return None
+        logger.warning("Wheel load hit its ceiling of %d rounds", rounds)
+        return rounds
 
     async def _extract_overlay(
         self,

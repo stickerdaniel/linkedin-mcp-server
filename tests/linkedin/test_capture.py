@@ -2339,13 +2339,13 @@ class TestWheelLoad:
             "linkedin_mcp_server.linkedin.session.asyncio.sleep",
             new_callable=AsyncMock,
         ):
-            await _capture(page)._wheel_load(max_scrolls)
-        return page.mouse.wheel.await_count
+            cut_off_at = await _capture(page)._wheel_load(max_scrolls)
+        return page.mouse.wheel.await_count, cut_off_at
 
     async def test_stops_after_three_rounds_without_growth(self, mock_page):
-        wheels = await self._run(mock_page, [100, 200, 300, 300, 300, 300])
+        wheels, cut_off_at = await self._run(mock_page, [100, 200, 300, 300, 300, 300])
 
-        assert wheels == 5
+        assert (wheels, cut_off_at) == (5, None)
         mock_page.mouse.move.assert_awaited_once_with(500, 400)
 
     async def test_growth_resets_the_stale_count(self, mock_page):
@@ -2353,19 +2353,23 @@ class TestWheelLoad:
 
         Without the reset the third flat round would end the loop at four.
         """
-        wheels = await self._run(mock_page, [100, 100, 100, 200, 200, 200, 200])
+        wheels, cut_off_at = await self._run(
+            mock_page, [100, 100, 100, 200, 200, 200, 200]
+        )
 
-        assert wheels == 6
+        assert (wheels, cut_off_at) == (6, None)
 
     async def test_max_scrolls_caps_a_list_that_keeps_growing(self, mock_page):
-        wheels = await self._run(mock_page, range(0, 1000, 10), max_scrolls=3)
+        wheels, cut_off_at = await self._run(
+            mock_page, range(0, 1000, 10), max_scrolls=3
+        )
 
-        assert wheels == 3
+        assert (wheels, cut_off_at) == (3, 3)
 
     async def test_default_ceiling_is_forty_rounds(self, mock_page):
-        wheels = await self._run(mock_page, range(0, 10000, 10))
+        wheels, cut_off_at = await self._run(mock_page, range(0, 10000, 10))
 
-        assert wheels == 40
+        assert (wheels, cut_off_at) == (40, 40)
 
     async def test_reads_only_a_linkedin_document(self, mock_page):
         """The length read goes through run_on_linkedin, so a page that left
@@ -2376,3 +2380,56 @@ class TestWheelLoad:
             await self._run(mock_page, [100, 200])
 
         mock_page.mouse.wheel.assert_not_awaited()
+
+    @pytest.mark.parametrize(
+        ("cut_off_at", "error_type"), [(None, None), (7, "list_incomplete")]
+    )
+    async def test_a_cut_off_list_keeps_its_text_and_says_so(
+        self, mock_page, cut_off_at, error_type
+    ):
+        """The ceiling must not pass a partial list off as the whole one."""
+        mock_page.evaluate = AsyncMock(
+            return_value={"source": "root", "text": "Skills\nPython", "references": []}
+        )
+        mock_page.wait_for_function = AsyncMock()
+        mock_page.locator = MagicMock(
+            return_value=MagicMock(count=AsyncMock(return_value=0))
+        )
+        capture = _capture(mock_page)
+
+        with (
+            patch.object(
+                capture, "_wheel_load", AsyncMock(return_value=cut_off_at)
+            ) as wheel_load,
+            patch(
+                "linkedin_mcp_server.linkedin.session.scroll_to_bottom",
+                new_callable=AsyncMock,
+            ),
+            patch(
+                "linkedin_mcp_server.linkedin.session.detect_rate_limit",
+                new_callable=AsyncMock,
+            ),
+            patch(
+                "linkedin_mcp_server.linkedin.session.handle_modal_close",
+                new_callable=AsyncMock,
+                return_value=False,
+            ),
+            patch(
+                "linkedin_mcp_server.linkedin.session.asyncio.sleep",
+                new_callable=AsyncMock,
+            ),
+        ):
+            result = await capture._capture_once(
+                "https://www.linkedin.com/in/billgates/details/skills/",
+                section_name="skills",
+                plan=CapturePlan(CaptureMode.DETAILS | CaptureMode.WHEEL_LOAD),
+            )
+
+        wheel_load.assert_awaited_once_with(None)
+        assert result.text == "Skills\nPython"
+        if cut_off_at is None:
+            assert result.error is None
+        else:
+            assert result.error is not None
+            assert result.error["error_type"] == error_type
+            assert f"after {cut_off_at} scroll rounds" in result.error["error_message"]
