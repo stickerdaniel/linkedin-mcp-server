@@ -18,6 +18,17 @@ class InvalidReferenceError(LinkedInOperationError):
     pass
 
 
+class InvalidAnswerError(LinkedInOperationError):
+    """An answer the caller supplied does not fit the form field it names.
+
+    Separate from the other operation errors for the same reason as
+    `InvalidReferenceError`: nothing is broken, the answer is wrong and the
+    message says which field refused it and what it takes.
+    """
+
+    pass
+
+
 class AuthenticationError(LinkedInOperationError):
     """Raised when authentication fails."""
 
