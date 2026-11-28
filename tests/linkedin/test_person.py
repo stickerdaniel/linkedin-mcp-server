@@ -306,7 +306,13 @@ class TestReadPersonUrls:
         assert [
             capture_call.kwargs["plan"].mode
             for capture_call in mock_extract.call_args_list
-        ] == [CaptureMode.STANDARD, *([CaptureMode.DETAILS] * 9), CaptureMode.ACTIVITY]
+        ] == [
+            CaptureMode.STANDARD,
+            *([CaptureMode.DETAILS] * 7),
+            CaptureMode.DETAILS | CaptureMode.WHEEL_LOAD,  # skills, issue #590
+            CaptureMode.DETAILS,
+            CaptureMode.ACTIVITY,
+        ]
         assert mock_overlay.call_args.kwargs["plan"].mode is CaptureMode.OVERLAY
         # Verify each expected suffix was navigated
         assert any(u.endswith("/in/testuser/") for u in all_urls)

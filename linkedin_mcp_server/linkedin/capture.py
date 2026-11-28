@@ -55,6 +55,22 @@ logger = logging.getLogger(__name__)
 # without anything failing.
 RATE_LIMIT_RETRY_DELAY = 5.0
 
+# Wheel loading (CaptureMode.WHEEL_LOAD). The delta matches the feed's wheel
+# scroll. A list stops loading after this many rounds in a row without growth,
+# and never wheels more than the round ceiling unless the caller's max_scrolls
+# says otherwise.
+_WHEEL_LOAD_DELTA = 2000
+_WHEEL_LOAD_PAUSE = 1.5
+_WHEEL_LOAD_MAX_STALE = 3
+_WHEEL_LOAD_MAX_ROUNDS = 40
+# Length of the text in <main>: the only progress signal the loop needs, and
+# one that reads the same in every locale. A function expression, as
+# PageSession.run_on_linkedin takes it.
+_WHEEL_LOAD_TEXT_LENGTH = (
+    "() => { const wheelLoadMain = document.querySelector('main');"
+    " return (wheelLoadMain?.innerText || '').length; }"
+)
+
 
 class OverlayRootNotFoundError(RuntimeError):
     """The overlay read found neither accepted overlay root on the page."""
@@ -71,6 +87,7 @@ class CaptureMode(Flag):
     OVERLAY = auto()
     POST_PERMALINKS = auto()
     JOB_POSTING = auto()
+    WHEEL_LOAD = auto()
 
 
 @dataclass(frozen=True)
@@ -437,6 +454,12 @@ class SectionCapture:
                     logger.debug("Show more click failed: %s", e)
                     break
 
+        # Some lists (the skills details page, issue #590) have no "Show more"
+        # pager and ignore window.scrollTo: they append the next batch only on a
+        # real wheel event over the page.
+        if CaptureMode.WHEEL_LOAD in plan.mode:
+            await self._wheel_load(plan.max_scrolls)
+
         # A posting renders its header, apply controls and company boilerplate
         # before the description panel, so a page read once `<main>` exists
         # can come back whole except for the description. Nothing structural
@@ -477,6 +500,32 @@ class SectionCapture:
                 references, captured, context=section_name
             )
         return ExtractedSection(text=cleaned, references=references)
+
+    async def _wheel_load(self, max_scrolls: int | None) -> None:
+        """Wheel over the page until the text in ``<main>`` stops growing.
+
+        Wheels at the viewport centre, as the feed does. It stops after
+        ``_WHEEL_LOAD_MAX_STALE`` rounds in a row without growth, or after
+        ``max_scrolls`` rounds (``_WHEEL_LOAD_MAX_ROUNDS`` when unset).
+        """
+        page = self._session.page
+        viewport = page.viewport_size or {"width": 1280, "height": 720}
+        await page.mouse.move(viewport["width"] // 2, viewport["height"] // 2)
+        rounds = max_scrolls if max_scrolls is not None else _WHEEL_LOAD_MAX_ROUNDS
+        last = await self._session.run_on_linkedin(_WHEEL_LOAD_TEXT_LENGTH)
+        stale = 0
+        for i in range(rounds):
+            await page.mouse.wheel(0, _WHEEL_LOAD_DELTA)
+            await self._session.delay(_WHEEL_LOAD_PAUSE)
+            length = await self._session.run_on_linkedin(_WHEEL_LOAD_TEXT_LENGTH)
+            if length > last:
+                last, stale = length, 0
+                continue
+            stale += 1
+            if stale >= _WHEEL_LOAD_MAX_STALE:
+                logger.debug("Wheel load stopped growing after %d rounds", i + 1)
+                return
+        logger.debug("Wheel load hit its ceiling of %d rounds", rounds)
 
     async def _extract_overlay(
         self,

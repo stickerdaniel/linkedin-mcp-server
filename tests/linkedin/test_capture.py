@@ -14,7 +14,10 @@ import re
 
 import pytest
 
-from linkedin_mcp_server.core.exceptions import AuthenticationError
+from linkedin_mcp_server.core.exceptions import (
+    AuthenticationError,
+    OffLinkedInLandingError,
+)
 from linkedin_mcp_server.linkedin import capture as capture_module
 from linkedin_mcp_server.linkedin.capture import (
     RATE_LIMIT_RETRY_DELAY,
@@ -2321,3 +2324,55 @@ class SectionCapture:
         return capture_plan_for_url(url)
 """
     assert _generic_capture_domain_path_literals(allowed) == set()
+
+
+class TestWheelLoad:
+    """CaptureMode.WHEEL_LOAD: the skills list grows only on a wheel (#590)."""
+
+    @staticmethod
+    async def _run(page, lengths, max_scrolls=None):
+        """Wheel-load a page whose <main> text reports *lengths* in turn."""
+        page.evaluate = AsyncMock(side_effect=list(lengths))
+        page.viewport_size = {"width": 1000, "height": 800}
+        page.mouse = MagicMock(move=AsyncMock(), wheel=AsyncMock())
+        with patch(
+            "linkedin_mcp_server.linkedin.session.asyncio.sleep",
+            new_callable=AsyncMock,
+        ):
+            await _capture(page)._wheel_load(max_scrolls)
+        return page.mouse.wheel.await_count
+
+    async def test_stops_after_three_rounds_without_growth(self, mock_page):
+        wheels = await self._run(mock_page, [100, 200, 300, 300, 300, 300])
+
+        assert wheels == 5
+        mock_page.mouse.move.assert_awaited_once_with(500, 400)
+
+    async def test_growth_resets_the_stale_count(self, mock_page):
+        """Two flat rounds, then growth, then three flat rounds: six wheels.
+
+        Without the reset the third flat round would end the loop at four.
+        """
+        wheels = await self._run(mock_page, [100, 100, 100, 200, 200, 200, 200])
+
+        assert wheels == 6
+
+    async def test_max_scrolls_caps_a_list_that_keeps_growing(self, mock_page):
+        wheels = await self._run(mock_page, range(0, 1000, 10), max_scrolls=3)
+
+        assert wheels == 3
+
+    async def test_default_ceiling_is_forty_rounds(self, mock_page):
+        wheels = await self._run(mock_page, range(0, 10000, 10))
+
+        assert wheels == 40
+
+    async def test_reads_only_a_linkedin_document(self, mock_page):
+        """The length read goes through run_on_linkedin, so a page that left
+        LinkedIn stops the loop instead of being read as LinkedIn's."""
+        mock_page.url = "https://example.com/"
+
+        with pytest.raises(OffLinkedInLandingError):
+            await self._run(mock_page, [100, 200])
+
+        mock_page.mouse.wheel.assert_not_awaited()
