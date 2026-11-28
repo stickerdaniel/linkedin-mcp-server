@@ -325,14 +325,30 @@ async def detect_rate_limit(page: Page) -> None:
 
 
 async def scroll_to_bottom(
-    page: Page, pause_time: float = 1.0, max_scrolls: int = 10
+    page: Page,
+    pause_time: float = 1.0,
+    max_scrolls: int = 10,
+    settle_timeout: float = 2.0,
+    poll_interval: float = 0.25,
 ) -> None:
     """Scroll to the bottom of the page to trigger lazy loading.
+
+    One quiet round is not the bottom. A lazy list such as
+    ``/details/experience/`` fetches its next batch after the scroll event,
+    and that fetch can take longer than ``pause_time``. Stopping on the first
+    round whose height did not change is what returned only the first rendered
+    entries of a detail section (#1464). A quiet round therefore keeps watching
+    the height for up to ``settle_timeout`` before it counts as the bottom;
+    growth inside that window is an ordinary round and scrolling continues.
+    The extra wait is paid once, on the round that really ends the scroll.
 
     Args:
         page: Patchright page object
         pause_time: Time to pause between scrolls (seconds)
         max_scrolls: Maximum number of scroll attempts
+        settle_timeout: Longest extra wait on a quiet round before it counts
+            as the bottom (seconds)
+        poll_interval: How often the height is read during that wait (seconds)
     """
     for i in range(max_scrolls):
         previous_height = await page.evaluate("document.body.scrollHeight")
@@ -340,6 +356,11 @@ async def scroll_to_bottom(
         await asyncio.sleep(pause_time)
 
         new_height = await page.evaluate("document.body.scrollHeight")
+        settle_until = time.monotonic() + settle_timeout
+        while new_height == previous_height and time.monotonic() < settle_until:
+            await asyncio.sleep(poll_interval)
+            new_height = await page.evaluate("document.body.scrollHeight")
+
         if new_height == previous_height:
             logger.debug("Reached bottom after %d scrolls", i + 1)
             break
