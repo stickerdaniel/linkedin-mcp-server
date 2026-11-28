@@ -1104,6 +1104,18 @@
           "maximum": 10,
           "minimum": 1,
           "type": "integer"
+        },
+        "sort_by": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional ``date`` for Latest,\n``relevance`` for Top match. Omit or leave blank to keep\nLinkedIn's default ordering."
         }
       },
       "required": [
