@@ -2339,13 +2339,13 @@ class TestWheelLoad:
             "linkedin_mcp_server.linkedin.session.asyncio.sleep",
             new_callable=AsyncMock,
         ):
-            cut_off_at = await _capture(page)._wheel_load(max_scrolls)
-        return page.mouse.wheel.await_count, cut_off_at
+            error = await _capture(page)._wheel_load(max_scrolls)
+        return page.mouse.wheel.await_count, error
 
     async def test_stops_after_three_rounds_without_growth(self, mock_page):
-        wheels, cut_off_at = await self._run(mock_page, [100, 200, 300, 300, 300, 300])
+        wheels, error = await self._run(mock_page, [100, 200, 300, 300, 300, 300])
 
-        assert (wheels, cut_off_at) == (5, None)
+        assert (wheels, error) == (5, None)
         mock_page.mouse.move.assert_awaited_once_with(500, 400)
 
     async def test_growth_resets_the_stale_count(self, mock_page):
@@ -2353,23 +2353,34 @@ class TestWheelLoad:
 
         Without the reset the third flat round would end the loop at four.
         """
-        wheels, cut_off_at = await self._run(
-            mock_page, [100, 100, 100, 200, 200, 200, 200]
-        )
+        wheels, error = await self._run(mock_page, [100, 100, 100, 200, 200, 200, 200])
 
-        assert (wheels, cut_off_at) == (6, None)
+        assert (wheels, error) == (6, None)
 
     async def test_max_scrolls_caps_a_list_that_keeps_growing(self, mock_page):
-        wheels, cut_off_at = await self._run(
-            mock_page, range(0, 1000, 10), max_scrolls=3
-        )
+        wheels, error = await self._run(mock_page, range(0, 1000, 10), max_scrolls=3)
 
-        assert (wheels, cut_off_at) == (3, 3)
+        assert wheels == 3
+        assert error is not None
+        assert error["error_type"] == "list_incomplete"
+        assert "limit of 3 scroll rounds" in error["error_message"]
 
-    async def test_default_ceiling_is_forty_rounds(self, mock_page):
-        wheels, cut_off_at = await self._run(mock_page, range(0, 10000, 10))
+    async def test_default_ceiling_is_twenty_rounds(self, mock_page):
+        wheels, error = await self._run(mock_page, range(0, 10000, 10))
 
-        assert (wheels, cut_off_at) == (40, 40)
+        assert wheels == 20
+        assert error is not None
+        assert "limit of 20 scroll rounds" in error["error_message"]
+
+    async def test_a_throttled_batch_is_not_the_end_of_the_list(self, mock_page):
+        """A 429 on the next batch leaves the list flat, as its end does."""
+        with patch.object(capture_module, "throttled_count", side_effect=[0, 1]):
+            wheels, error = await self._run(mock_page, [100, 200, 200, 200, 200])
+
+        assert wheels == 4
+        assert error is not None
+        assert error["error_type"] == "list_incomplete"
+        assert "throttled" in error["error_message"]
 
     async def test_reads_only_a_linkedin_document(self, mock_page):
         """The length read goes through run_on_linkedin, so a page that left
@@ -2382,10 +2393,11 @@ class TestWheelLoad:
         mock_page.mouse.wheel.assert_not_awaited()
 
     @pytest.mark.parametrize(
-        ("cut_off_at", "error_type"), [(None, None), (7, "list_incomplete")]
+        "wheel_error",
+        [None, {"error_type": "list_incomplete", "error_message": "Cut off."}],
     )
     async def test_a_cut_off_list_keeps_its_text_and_says_so(
-        self, mock_page, cut_off_at, error_type
+        self, mock_page, wheel_error
     ):
         """The ceiling must not pass a partial list off as the whole one."""
         mock_page.evaluate = AsyncMock(
@@ -2399,7 +2411,7 @@ class TestWheelLoad:
 
         with (
             patch.object(
-                capture, "_wheel_load", AsyncMock(return_value=cut_off_at)
+                capture, "_wheel_load", AsyncMock(return_value=wheel_error)
             ) as wheel_load,
             patch(
                 "linkedin_mcp_server.linkedin.session.scroll_to_bottom",
@@ -2427,9 +2439,4 @@ class TestWheelLoad:
 
         wheel_load.assert_awaited_once_with(None)
         assert result.text == "Skills\nPython"
-        if cut_off_at is None:
-            assert result.error is None
-        else:
-            assert result.error is not None
-            assert result.error["error_type"] == error_type
-            assert f"after {cut_off_at} scroll rounds" in result.error["error_message"]
+        assert result.error == wheel_error

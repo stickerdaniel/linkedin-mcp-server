@@ -24,6 +24,7 @@ from linkedin_mcp_server.core.exceptions import (
     LinkedInOperationError,
     OffLinkedInLandingError,
 )
+from linkedin_mcp_server.core.throttle import throttle_evidence, throttled_count
 from linkedin_mcp_server.error_diagnostics import build_issue_diagnostics
 from linkedin_mcp_server.linkedin.content import PageContentReader
 from linkedin_mcp_server.linkedin.contracts import (
@@ -63,7 +64,7 @@ RATE_LIMIT_RETRY_DELAY = 5.0
 _WHEEL_LOAD_DELTA = 2000
 _WHEEL_LOAD_PAUSE = 1.5
 _WHEEL_LOAD_MAX_STALE = 3
-_WHEEL_LOAD_MAX_ROUNDS = 40
+_WHEEL_LOAD_MAX_ROUNDS = 20
 # Length of the text in <main>: the only progress signal the loop needs, and
 # one that reads the same in every locale. A function expression, as
 # PageSession.run_on_linkedin takes it.
@@ -458,9 +459,9 @@ class SectionCapture:
         # Some lists (the skills details page, issue #590) have no "Show more"
         # pager and ignore window.scrollTo: they append the next batch only on a
         # real wheel event over the page.
-        wheel_cut_off_at: int | None = None
+        wheel_error: dict[str, str] | None = None
         if CaptureMode.WHEEL_LOAD in plan.mode:
-            wheel_cut_off_at = await self._wheel_load(plan.max_scrolls)
+            wheel_error = await self._wheel_load(plan.max_scrolls)
 
         # A posting renders its header, apply controls and company boilerplate
         # before the description panel, so a page read once `<main>` exists
@@ -501,28 +502,29 @@ class SectionCapture:
             references = append_permalink_references(
                 references, captured, context=section_name
             )
-        if wheel_cut_off_at is not None:
+        if wheel_error is not None:
             return ExtractedSection(
-                text=cleaned,
-                references=references,
-                error=list_incomplete_section_error(wheel_cut_off_at),
+                text=cleaned, references=references, error=wheel_error
             )
         return ExtractedSection(text=cleaned, references=references)
 
-    async def _wheel_load(self, max_scrolls: int | None) -> int | None:
+    async def _wheel_load(self, max_scrolls: int | None) -> dict[str, str] | None:
         """Wheel over the page until the text in ``<main>`` stops growing.
 
         Wheels at the viewport centre, as the feed does. It stops after
         ``_WHEEL_LOAD_MAX_STALE`` rounds in a row without growth, or after
         ``max_scrolls`` rounds (``_WHEEL_LOAD_MAX_ROUNDS`` when unset).
 
-        Returns None once the list stopped growing, or the number of rounds
-        spent when the ceiling cut it off while it was still growing.
+        Returns None once the list stopped growing, or the ``list_incomplete``
+        section error when the ceiling ended the read first or LinkedIn
+        throttled a request while the list loaded: a refused batch leaves the
+        list as flat as its end does.
         """
         page = self._session.page
         viewport = page.viewport_size or {"width": 1280, "height": 720}
         await page.mouse.move(viewport["width"] // 2, viewport["height"] // 2)
         rounds = max_scrolls if max_scrolls is not None else _WHEEL_LOAD_MAX_ROUNDS
+        refused_before = throttled_count()
         last = await self._session.run_on_linkedin(_WHEEL_LOAD_TEXT_LENGTH)
         stale = 0
         for i in range(rounds):
@@ -535,9 +537,17 @@ class SectionCapture:
             stale += 1
             if stale >= _WHEEL_LOAD_MAX_STALE:
                 logger.debug("Wheel load stopped growing after %d rounds", i + 1)
+                if throttled_count() > refused_before:
+                    return list_incomplete_section_error(
+                        "LinkedIn throttled a request while the list loaded. "
+                        + (throttle_evidence() or "")
+                    )
                 return None
         logger.warning("Wheel load hit its ceiling of %d rounds", rounds)
-        return rounds
+        return list_incomplete_section_error(
+            f"The read reached its limit of {rounds} scroll rounds before the "
+            "list showed its end; a higher max_scrolls may return more."
+        )
 
     async def _extract_overlay(
         self,

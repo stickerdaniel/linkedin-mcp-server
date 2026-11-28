@@ -117,9 +117,9 @@ class TestWheelLoadInABrowser:
         await serve(dom_page, wheel_loaded_list(batches=6))
         await dom_page.goto(SKILLS_URL)
 
-        cut_off_at = await capture(dom_page)._wheel_load(None)
+        error = await capture(dom_page)._wheel_load(None)
 
-        assert cut_off_at is None
+        assert error is None
         text = await main_text(dom_page)
         assert "Skill batch 6" in text
         assert text.count("Skill batch") == 6
@@ -128,9 +128,10 @@ class TestWheelLoadInABrowser:
         await serve(dom_page, wheel_loaded_list(batches=None))
         await dom_page.goto(SKILLS_URL)
 
-        cut_off_at = await capture(dom_page)._wheel_load(4)
+        error = await capture(dom_page)._wheel_load(4)
 
-        assert cut_off_at == 4
+        assert error is not None
+        assert error["error_type"] == "list_incomplete"
         assert (await main_text(dom_page)).count("Skill batch") == 5
 
     async def test_another_sites_document_is_not_read(self, dom_page):

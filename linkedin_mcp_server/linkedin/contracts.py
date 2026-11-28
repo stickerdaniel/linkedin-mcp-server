@@ -91,8 +91,8 @@ def rate_limited_section_error() -> dict[str, str]:
     }
 
 
-def list_incomplete_section_error(rounds: int) -> dict[str, str]:
-    """The ``section_errors`` entry for a list still growing when the read stopped.
+def list_incomplete_section_error(reason: str) -> dict[str, str]:
+    """The ``section_errors`` entry for a list read before it showed its end.
 
     The text that loaded is kept beside it, as for a job posting without its
     description: a caller that sees a full-looking list with no error would
@@ -100,10 +100,7 @@ def list_incomplete_section_error(rounds: int) -> dict[str, str]:
     """
     return {
         "error_type": "list_incomplete",
-        "error_message": (
-            f"The list was still loading after {rounds} scroll rounds. The text "
-            "was kept but may be incomplete; a higher max_scrolls may return more."
-        ),
+        "error_message": f"{reason.strip()} The text was kept but may be incomplete.",
     }
 
 

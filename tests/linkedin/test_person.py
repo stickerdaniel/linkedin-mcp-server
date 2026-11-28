@@ -234,7 +234,7 @@ class TestReadPersonUrls:
     async def test_read_person_keeps_text_and_error_of_a_partial_list(self, mock_page):
         """A list cut off while loading returns its text and a warning (#590)."""
         reader = _reader(mock_page)
-        warning = list_incomplete_section_error(40)
+        warning = list_incomplete_section_error("Cut off.")
         with (
             patch.object(
                 reader._capture,
