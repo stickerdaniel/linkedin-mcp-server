@@ -178,7 +178,6 @@ class TestBuildContentSearchUrlSort:
         ("sort_by", "token"),
         [
             ("date", "date_posted"),
-            ("date_posted", "date_posted"),
             ("relevance", "relevance"),
             (" date ", "date_posted"),
         ],
@@ -221,7 +220,16 @@ class TestBuildContentSearchUrlSort:
         }
 
     @pytest.mark.parametrize(
-        "sort_by", ["latest", "DD", "R", "DATE", " date posted ", '["date_posted"]']
+        "sort_by",
+        [
+            "latest",
+            "date_posted",
+            "DD",
+            "R",
+            "DATE",
+            " date posted ",
+            '["date_posted"]',
+        ],
     )
     def test_unknown_nonblank_sort_is_refused(self, sort_by):
         with pytest.raises(FilterValidationError, match="Invalid sort_by"):

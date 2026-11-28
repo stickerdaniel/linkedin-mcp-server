@@ -324,7 +324,7 @@ async def test_facade_search_posts_forwards_its_content_type_filter(mock_page):
         await extractor.search_posts("unity", content_type="articles")
 
 
-@pytest.mark.parametrize("sort_by", ["date", "date_posted", "relevance"])
+@pytest.mark.parametrize("sort_by", ["date", "relevance"])
 async def test_facade_search_posts_keeps_existing_positions_and_forwards_sort(
     mock_page, sort_by
 ):

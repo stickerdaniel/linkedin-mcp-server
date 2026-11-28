@@ -890,7 +890,7 @@
                 }
               ],
               "default": null,
-              "description": "Optional ``date`` (or ``date_posted``) for Latest,\n``relevance`` for Top match. Omit or leave blank to keep\nLinkedIn's default ordering."
+              "description": "Optional ``date`` for Latest,\n``relevance`` for Top match. Omit or leave blank to keep\nLinkedIn's default ordering."
             }
           },
           "required": [

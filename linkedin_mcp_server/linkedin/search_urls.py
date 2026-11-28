@@ -74,7 +74,6 @@ CONTENT_TYPE_MAP = {
 
 CONTENT_SORT_BY_MAP = {
     "date": "date_posted",
-    "date_posted": "date_posted",
     "relevance": "relevance",
 }
 
@@ -253,7 +252,7 @@ def build_content_search_url(
     ``content_type`` is refused the same way and for the same reason. It is
     written after ``datePosted``, the order the live page produces.
 
-    ``sort_by`` accepts ``date`` / ``date_posted`` for Latest and
+    ``sort_by`` accepts ``date`` for Latest and
     ``relevance`` for Top match. It uses its own JSON-list facet, unlike
     job search's ``sortBy=DD|R``. Omission keeps LinkedIn's default ordering.
     """

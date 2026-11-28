@@ -72,7 +72,7 @@ class PostSearch:
                 ``search_urls.CONTENT_TYPE_MAP`` (e.g. "documents" for the
                 PDFs and slide decks people upload). Refused when unknown,
                 like ``date_posted``.
-            sort_by: Optional ``date`` / ``date_posted`` for Latest or
+            sort_by: Optional ``date`` for Latest or
                 ``relevance`` for Top match. Unknown values are refused;
                 omission or a blank value keeps LinkedIn's default ordering.
             max_pages: Scroll depth, expressed in result "pages" of roughly

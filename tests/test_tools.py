@@ -2891,23 +2891,7 @@ class TestFeedTools:
 
 
 class TestPostTools:
-    async def test_search_posts_publishes_optional_nullable_sort(self):
-        from linkedin_mcp_server.tools.post import register_post_tools
-
-        mcp = FastMCP("test")
-        register_post_tools(mcp)
-        tool = await mcp.get_tool("search_posts")
-
-        assert tool is not None
-        properties = tool.parameters["properties"]
-        assert properties["sort_by"]["anyOf"] == [{"type": "string"}, {"type": "null"}]
-        assert properties["sort_by"]["default"] is None
-        assert "sort_by" not in tool.parameters.get("required", [])
-        assert "ctx" not in properties
-        assert "date_posted" in properties["sort_by"]["description"]
-        assert "relevance" in properties["sort_by"]["description"]
-
-    @pytest.mark.parametrize("sort_by", ["date", "date_posted", "relevance", None, ""])
+    @pytest.mark.parametrize("sort_by", ["date", "relevance", None, ""])
     async def test_search_posts_mcp_call_forwards_sort_with_other_filters(
         self, sort_by, serve_extractor
     ):

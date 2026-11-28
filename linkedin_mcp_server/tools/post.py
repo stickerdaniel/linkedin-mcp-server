@@ -62,7 +62,7 @@ def register_post_tools(
             content_type: Optional "Content type" filter. One of
                 "documents" (PDFs and slide decks people upload), "images",
                 "videos", "live_videos", "job_posts". Omit for all posts.
-            sort_by: Optional ``date`` (or ``date_posted``) for Latest,
+            sort_by: Optional ``date`` for Latest,
                 ``relevance`` for Top match. Omit or leave blank to keep
                 LinkedIn's default ordering.
             max_pages: Scroll depth as result "pages" of ~5 scrolls each

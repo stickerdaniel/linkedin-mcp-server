@@ -49,7 +49,6 @@ class TestSearchPosts:
         ("sort_by", "token"),
         [
             ("date", "date_posted"),
-            ("date_posted", "date_posted"),
             ("relevance", "relevance"),
         ],
     )
